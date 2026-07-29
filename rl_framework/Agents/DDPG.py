@@ -135,18 +135,37 @@ class ReplayBuffer:
     def __init__(self, capacity=int(1e6)):
         self.buffer = deque(maxlen=capacity)
 
-    def push(self, s, a, r, s2, d):
-        self.buffer.append((s, a, r, s2, d))
+    def push(self, s, a, r, s2, d, action_mask, next_action_mask):
+        """Store one transition and its transition-specific action masks."""
+        self.buffer.append((s, a, r, s2, d, action_mask, next_action_mask))
 
     def sample(self, batch_size):
         batch = random.sample(self.buffer, batch_size)
-        state, action, reward, next_state, done = map(np.stack, zip(*batch))
+        transition_columns = tuple(zip(*batch))
+        if len(transition_columns) != 7:
+            raise ValueError(
+                "Replay transitions must contain current and next action masks. "
+                "Legacy five-field replay buffers cannot be used for dynamic masking."
+            )
+
+        (
+            state,
+            action,
+            reward,
+            next_state,
+            done,
+            action_mask,
+            next_action_mask,
+        ) = map(np.stack, transition_columns)
+
         return (
             torch.FloatTensor(state).to(device),
             torch.FloatTensor(action).to(device),
             torch.FloatTensor(reward).unsqueeze(1).to(device),
             torch.FloatTensor(next_state).to(device),
-            torch.FloatTensor(done).unsqueeze(1).to(device)
+            torch.FloatTensor(done).unsqueeze(1).to(device),
+            torch.FloatTensor(action_mask).to(device),
+            torch.FloatTensor(next_action_mask).to(device),
         )
 
     def __len__(self):
@@ -158,16 +177,18 @@ class ReplayBuffer:
     
     def load(self, filepath):
         with open(filepath, 'rb') as f:
-            Pickled_buffer = pickle.load(f)
-        
-        #print("############# debiging in ddpg memory ############# ")
-        #print("Type Pickled_buffer: ", type(Pickled_buffer))
-        #self.buffer= Pickled_buffer.buffer depends if we picled te whole Replay buffer or only the deque
-        self.buffer= Pickled_buffer
-        
-        #print("Type Pickled_buffer.buffer:  ", Pickled_buffer.buffer)
-        #print("Type buffer: ", type(self.buffer))
-        #mprint("############# debiging in ddpg memory ############# ")
+            loaded_buffer = pickle.load(f)
+
+        # Support files that contain either a deque directly or a ReplayBuffer.
+        loaded_buffer = getattr(loaded_buffer, "buffer", loaded_buffer)
+        if loaded_buffer and len(loaded_buffer[0]) != 7:
+            raise ValueError(
+                "This replay buffer predates dynamic action masking and does not "
+                "contain current/next masks. Collect a new replay buffer before "
+                "training the masked agent."
+            )
+
+        self.buffer = deque(loaded_buffer, maxlen=self.buffer.maxlen)
             
 
 import os
@@ -178,7 +199,7 @@ import matplotlib.pyplot as plt
 
 class DDPGAgent:
     def __init__(self, env, convert= True, alpha=1e-4, beta=1e-3, batch_size=128, gamma=0.99, tau=0.005, max_size=1000000, noise_type='gaussian',
-                 log_interval=100, eval_interval=1000, num_steps=1000000, seed=0, exp="", load=False):
+                 log_interval=100, eval_interval=1000, num_steps=1000000, seed=0, exp="", load=False, load_tag="last"):
         set_seed(seed)
         self.seed = int(seed)
         self.device= device
@@ -219,6 +240,7 @@ class DDPGAgent:
         self.logs = []
         self.exp = exp
         self.load = load
+        self.load_tag = "last" if str(load_tag).lower() in ("latest",) else str(load_tag).lower()
 
         # TensorBoard
         self.summary_dir = os.path.join(os.getcwd(), 'summary')
@@ -244,7 +266,7 @@ class DDPGAgent:
         self.recent_eval_logs = deque(maxlen=10)
 
         if self.load:
-            self.load_models()
+            self.load_models(tag=self.load_tag)
 
     '''def choose_action(self, state, greedy=0.5, log_source="train"):
         state = torch.FloatTensor(state).to(device)
@@ -262,8 +284,12 @@ class DDPGAgent:
    
 
     def choose_action(self, state, greedy=0.5, log_source="train"):
+        if state is None:
+            obs_dim = self.env.observation_space.shape[0]
+            state = np.zeros(obs_dim, dtype=np.float32)
         state = torch.FloatTensor(state).to(device)
-        action = self.actor(state).cpu().data.numpy().flatten()
+        with torch.no_grad():
+            action = self.actor(state).cpu().numpy().flatten()
         noise = greedy * self.noise.sample()
         action_noisy = action + noise
         action_noisy = np.clip(action_noisy, -1, 1)
@@ -275,32 +301,68 @@ class DDPGAgent:
         return max(greedy, greedy_end)
 
     def train(self, n_episodes=1000, max_steps=1000, greedy=0.5, start=0):
+        episode_max_steps = (
+            max_steps
+            if max_steps is not None
+            else getattr(self.env, "max_num_of_vars", None)
+        )
+        if episode_max_steps is None or int(episode_max_steps) <= 0:
+            raise ValueError("max_steps must be a positive integer")
+        episode_max_steps = int(episode_max_steps)
+
         scores = []
         for ep in range(start, n_episodes,1):
-            # Decay greediness as training progresses
             greedy_ep = self.get_greedy(ep, n_episodes, greedy_start=greedy, greedy_end=0.05)
-            state, _ = self.env.reset() if isinstance(self.env.reset(), tuple) else (self.env.reset(), {})
+            reset_out = self.env.reset()
+            state = reset_out[0] if isinstance(reset_out, tuple) else reset_out
+            if state is None:
+                print(f"Warning: reset returned None at episode {ep + 1}, skipping episode")
+                continue
             self.reset_noise()
             score = 0
             episode_actions = []
             done = False
-            while not done:
+            for episode_step in range(episode_max_steps):
                 if type(state) == tuple:
                     state = state[0]
                 action = self.choose_action(state, greedy=greedy_ep, log_source="train")
-                next_state, reward, done, _, info = self.env.step(action, self.convert)
-                self.remember(state, action, reward, next_state, done)
+                next_state, reward, terminated, truncated, info = self.env.step(action, self.convert)
+                done = bool(
+                    terminated
+                    or truncated
+                    or episode_step + 1 >= episode_max_steps
+                )
+                if next_state is None:
+                    obs_dim = self.env.observation_space.shape[0]
+                    next_state = np.zeros(obs_dim, dtype=np.float32)
+                    done = True
+
+                # returned_action is the fixed 4-D policy-space action that was
+                # effective in the environment. Do not use info["masked_action"]
+                # here; that is the beamline-length simulator action vector.
+                masked_action = info["returned_action"]
+                action_mask = info["returned_mask"]
+                next_action_mask = info["returned_mask_next"]
+                self.remember(
+                    state,
+                    masked_action,
+                    reward,
+                    next_state,
+                    done,
+                    action_mask,
+                    next_action_mask,
+                )
                 self.learn()
                 state = next_state
                 score += reward
                 self.steps += 1
-                episode_actions.append(action)
-                if self.steps % self.eval_interval == 0:
-                    self.evaluate()
+                episode_actions.append(masked_action)
                 if done:
                     self.writer.add_scalar('Rewards/Reward', reward, self.steps)
                     self.writer.add_scalar('Rewards/NumberOfParticles', info['number_of_particles'], self.steps)
                     break
+            if (ep +1 )% self.eval_interval == 0:
+                    self.evaluate()
             scores.append(score)
             self.train_rewards.append(score)
             self.logger.writerow({'episode': ep+1, 'epsilon': greedy_ep})
@@ -326,10 +388,23 @@ class DDPGAgent:
         if len(self.buffer) < self.batch_size:
             return
 
-        state, action, reward, next_state, done = self.buffer.sample(self.batch_size)
+        (
+            state,
+            action,
+            reward,
+            next_state,
+            done,
+            action_mask,
+            next_action_mask,
+        ) = self.buffer.sample(self.batch_size)
+
+        # The replay action should already be masked, but applying its mask here
+        # enforces the invariant at the critic boundary as well.
+        action = action * action_mask
 
         with torch.no_grad():
-            next_action = self.actor_target(next_state)
+            # Each transition can have a different next-element mask.
+            next_action = self.actor_target(next_state) * next_action_mask
             target_q = self.critic_target(next_state, next_action)
             y = reward + (1 - done) * self.gamma * target_q
 
@@ -340,11 +415,19 @@ class DDPGAgent:
         critic_loss.backward()
         self.critic_optimizer.step()
 
-        actor_loss = -self.critic(state, self.actor(state)).mean()
+        # Optimize the actor only through action dimensions that are valid for
+        # each sampled current state. Multiplication also gives exactly zero
+        # gradient to inactive output dimensions.
+        for parameter in self.critic.parameters():
+            parameter.requires_grad_(False)
+        policy_action = self.actor(state) * action_mask
+        actor_loss = -self.critic(state, policy_action).mean()
 
         self.actor_optimizer.zero_grad()
         actor_loss.backward()
         self.actor_optimizer.step()
+        for parameter in self.critic.parameters():
+            parameter.requires_grad_(True)
 
         self.soft_update(self.actor, self.actor_target)
         self.soft_update(self.critic, self.critic_target)
@@ -360,8 +443,31 @@ class DDPGAgent:
         for param, target_param in zip(net.parameters(), target_net.parameters()):
             target_param.data.copy_(self.tau * param.data + (1 - self.tau) * target_param.data)
 
-    def remember(self, s, a, r, s2, d):
-        self.buffer.push(s, a, r, s2, d)
+    def remember(self, s, a, r, s2, d, action_mask, next_action_mask):
+        action = np.asarray(a, dtype=np.float32).reshape(-1)
+        action_mask = np.asarray(action_mask, dtype=np.float32).reshape(-1)
+        next_action_mask = np.asarray(next_action_mask, dtype=np.float32).reshape(-1)
+
+        for name, value in (
+            ("action", action),
+            ("action_mask", action_mask),
+            ("next_action_mask", next_action_mask),
+        ):
+            if value.size != self.n_actions:
+                raise ValueError(
+                    f"{name} must contain {self.n_actions} values, got {value.size}"
+                )
+
+        # Store only the action that could actually affect this transition.
+        self.buffer.push(
+            s,
+            action * action_mask,
+            r,
+            s2,
+            d,
+            action_mask.copy(),
+            next_action_mask.copy(),
+        )
 
 
     def evaluate(self, episodes=1):
@@ -378,18 +484,25 @@ class DDPGAgent:
             episode_rewards = []
             episode_reward = 0.0
             done = False
-            state = self.env.reset()
+            reset_out = self.env.reset()
+            state = reset_out[0] if isinstance(reset_out, tuple) else reset_out
             episode_actions = []
             t = 0
-            while not done:
+            eval_max_steps = int(getattr(self.env, "max_num_of_vars", 1000))
+            while not done and t < eval_max_steps:
                 if type(state)== tuple:
                     state= state[0]
                 action = self.choose_action(state, greedy=0.0, log_source="eval")
-                next_state, reward, done, _, info = self.env.step(action, self.convert) 
+                next_state, reward, terminated, truncated, info = self.env.step(action, self.convert)
+                done = bool(terminated or truncated or t + 1 >= eval_max_steps)
+                if next_state is None:
+                    obs_dim = self.env.observation_space.shape[0]
+                    next_state = np.zeros(obs_dim, dtype=np.float32)
+                    done = True
                 episode_reward += reward
                 state = next_state
                 episode_rewards.append(reward)
-                episode_actions.append(action)
+                episode_actions.append(info.get("returned_action", action))
                 t += 1
                 eval_info = {
                     'episode': i + 1,
@@ -423,7 +536,7 @@ class DDPGAgent:
         eval_file_handler.close()
 
         self.save_models(tag="last")
-
+        #self.buffer.save(f"ddpg_checkpoint_intermediate_{self.seed}.pkl")
         if best_particles_this_eval > self.best_eval_particles:
             old_best_log = self.best_eval_log
             self.best_eval_particles = best_particles_this_eval

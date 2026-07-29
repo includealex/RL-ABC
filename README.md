@@ -1,210 +1,156 @@
 # RL-ABC: Reinforcement Learning for Accelerator Beamline Control
 
-This repository contains the source code for the RLABC framework described in:
+RL-ABC (RLABC) converts Elegant beamline lattice and command files into a
+Gymnasium environment for reinforcement-learning-based accelerator tuning.
+This repository contains the runnable framework used for:
 
-> A. Ibrahim, F. Ratnikov, M. Kaledin, A. Petrenko, D. Derkach,
-> "RL-ABC: Reinforcement Learning for Accelerator Beamline Control,"
-> https://arxiv.org/abs/2510.26805
+> A. Ibrahim, F. Ratnikov, M. Kaledin, A. Petrenko, and D. Derkach,
+> “RL-ABC: Reinforcement Learning for Accelerator Beamline Control,”
+> *Computer Physics Communications* (2026).
 
-RLABC is a Python framework that automatically transforms standard Elegant beamline lattice configurations into reinforcement learning environments, enabling RL-based optimization of particle accelerator beamlines.
+The repository intentionally contains source code and required example inputs
+only. Training logs, model checkpoints, replay buffers, generated Elegant
+files, observations, plots, and optimization results are excluded and covered
+by `.gitignore`.
+
+## Repository contents
+
+```text
+.
+├── train.py
+├── sb_train.py
+├── config_manager.py
+├── config.json
+├── machine.lte
+├── track.ele
+├── requirements.txt
+├── rl_framework/
+│   ├── __init__.py
+│   ├── Environment.py
+│   ├── Elegant.py
+│   ├── Utils.py
+│   └── Agents/
+│       ├── __init__.py
+│       └── DDPG.py
+└── classical_optimizers/
+    ├── README.md
+    ├── scipy_optimization.py
+    └── bayesian_optimization.py
+```
 
 ## Prerequisites
 
-This software requires the **Elegant** simulation program to be installed as an external dependency. Elegant is not a Python package; it is a standalone beam dynamics simulation code that RLABC invokes via subprocess calls during training and evaluation.
-
-**Elegant** (ELEctron Generation ANd Tracking) is developed and maintained by the Advanced Photon Source at Argonne National Laboratory:
-
-- Download and installation: https://www.aps.anl.gov/Accelerator-Operations-Physics/Software
-- Reference: M. Borland, "elegant: A Flexible SDDS-Compliant Code for Accelerator Simulation," Advanced Photon Source LS-287, Argonne National Laboratory (2000). https://doi.org/10.2172/761286
-
-The Elegant distribution includes the **SDDS Toolkit** (Self Describing Data Sets), a set of command-line utilities for data I/O. RLABC uses the following executables from this toolkit:
-
-| Executable      | Purpose within RLABC                                      |
-|-----------------|------------------------------------------------------------|
-| `elegant`       | Runs beam dynamics simulations                             |
-| `sdds2stream`   | Extracts particle coordinate data from SDDS output files   |
-| `sddsquery`     | Queries column names in SDDS files                         |
-| `sddsprocess`   | Post-processes SDDS data (coordinate transformations)      |
-
-After installing Elegant, note the paths to:
-1. The directory containing the `elegant` binary and SDDS utilities (configured as `platform.elegant_path`)
-2. The `defns.rpn` file from the SDDS Toolkit (configured as `platform.sdds_path`)
-
-These paths are set in `config.json` or `config.yaml` (see the Configuration section below).
-
-## Directory Structure
-
-```
-acc_elegant_rl_training/
-├── train.py                  # Main training script (custom DDPG agent)
-├── sb_train.py               # Training script using Stable-Baselines3 (SAC, DDPG, TD3)
-├── config_manager.py         # Configuration loading and CLI argument parsing
-├── config.json               # Configuration file (JSON format)
-├── config.yaml               # Configuration file (YAML format)
-├── machine.lte               # Elegant lattice file for the test beamline
-├── track.ele                 # Elegant command file (beam and simulation settings)
-├── requirements.txt          # Python dependencies (pip)
-├── pyproject.toml            # Project metadata and dependencies
-├── environment.yml           # Conda environment specification
-│
-├── rl_framework/             # Core framework modules
-│   ├── __init__.py
-│   ├── Environment.py        # Gymnasium environment (state, action, reward logic)
-│   ├── Elegant.py            # Elegant simulation wrapper (SDDS I/O, lattice processing)
-│   ├── Utils.py              # Lattice parsing, observation construction, helpers
-│   ├── visulize.py           # Beam optics and phase-space visualization
-│   └── Agents/
-│       ├── __init__.py
-│       └── DDPG.py           # DDPG agent (actor, critic, replay buffer, noise)
-│
-├── classical_optimizers/     # Baseline optimization methods
-│   ├── bayesian_optimization.py   # Bayesian optimization via bayesian-optimization / skopt
-│   ├── scipy_optimization.py      # Differential evolution via SciPy
-│   └── README.md
-│
-│
-├── docs/                     # Additional documentation
-│   ├── SETUP.md              # Platform-specific installation details
-│   ├── DEPLOYMENT_GUIDE.md   # Deployment on HPC clusters
-│   └── ...
-└── 
-```
-
-## Requirements
-
-- Elegant and the SDDS Toolkit (see Prerequisites above)
 - Python 3.10
+- Elegant and its SDDS Toolkit
 
-The Python dependencies are listed in `requirements.txt`. The main libraries used are:
-
-| Library             | Purpose                                    |
-|---------------------|--------------------------------------------|
-| PyTorch >= 2.0      | Neural network training                    |
-| Gymnasium >= 0.29   | RL environment interface                   |
-| Stable-Baselines3   | Alternative RL algorithms (SAC, TD3)       |
-| NumPy, Pandas       | Numerical computation and data handling    |
-| SciPy               | Differential evolution baseline            |
-| Matplotlib          | Visualization                              |
-| TensorBoard         | Training monitoring                        |
-| PyYAML              | Configuration file parsing                 |
+RLABC calls the external `elegant`, `sdds2stream`, `sddsquery`, and
+`sddsprocess` executables. Install Elegant from the
+[Advanced Photon Source software page](https://www.aps.anl.gov/Accelerator-Operations-Physics/Software).
 
 ## Installation
 
-1. **Install Elegant and the SDDS Toolkit** following the instructions in the Prerequisites section above.
+```bash
+python3.10 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
 
-2. **Install Python dependencies** using one of:
+Edit `config.json` before running:
 
-   ```bash
-   # Option A: pip (in a virtual environment)
-   python -m venv venv
-   source venv/bin/activate
-   pip install -r requirements.txt
+```json
+{
+  "platform": {
+    "os_type": "linux",
+    "elegant_path": "/path/to/elegant/bin/",
+    "sdds_path": "/path/to/elegant/defns.rpn"
+  }
+}
+```
 
-   # Option B: Conda
-   conda env create -f environment.yml
-   conda activate acc-elegant-rl
-   ```
+Keep the trailing slash on `elegant_path`. Use `os_type: "darwin"` on macOS.
+For an HPC command such as `srun -n 2 Pelegant`, set
+`simulation.override_dynamic_command` to `true` and configure
+`simulation.overridden_command`.
 
-3. **Configure paths** by editing `config.json` (or `config.yaml`). Set `platform.elegant_path` to the directory containing the Elegant binary, and `platform.sdds_path` to the path of the `defns.rpn` file from the SDDS Toolkit. For example:
+## Training
 
-   ```json
-   {
-     "platform": {
-       "os_type": "linux",
-       "elegant_path": "/usr/local/elegant/bin/",
-       "sdds_path": "/usr/local/elegant/defns.rpn"
-     }
-   }
-   ```
-
-## Running the Program
-
-### Training with the custom DDPG agent
+The default configuration starts a fresh, all-variable DDPG run with 1,000
+particles, 10,000 episodes, and Gaussian exploration noise decaying from 0.5
+to 0.05:
 
 ```bash
 python train.py
 ```
 
-This reads `config.json` by default. Configuration parameters can be overridden via command-line arguments:
+Common overrides:
 
 ```bash
-python train.py --training.n_episodes 1000 --training.seed 42 --agent.alpha 0.0002
+python train.py --training.seed 1 --training.cpu true
+python train.py --training.n_episodes 100 --environment.init_num_particles 1000
 ```
 
-### Training with Stable-Baselines3
+The paper’s 30,000-episode from-scratch schedule can be reproduced in two
+phases so that the noise reaches 0.05 after the first 10,000 episodes and then
+stays there:
 
 ```bash
-python sb_train.py --algo SAC --total-timesteps 100000 --seed 42
+python train.py
+python train.py \
+  --training.load_model true \
+  --buffer.load_buffer_bool true \
+  --training.n_episodes 20000 \
+  --training.greedy 0.05
 ```
 
-Supported algorithms: `SAC`, `DDPG`, `TD3`.
+The first command creates the checkpoint and replay buffer used by the second
+command. These generated files remain local and are not tracked by Git.
 
-### Evaluating a pretrained agent
+For K-only training, set `environment.reset_specific_keys_bool` to `true`.
+Setting it to `false` activates all 37 control variables: quadrupole strengths,
+horizontal and vertical kicks, and dipole field-scaling errors.
 
-The `models/` directory contains pretrained DDPG checkpoints. To run evaluation using these weights:
+## Stable-Baselines3
 
 ```bash
-python train.py --training.load_model true --training.n_episodes 10
+python sb_train.py --algo SAC --total-timesteps 100000 --seed 0
+python sb_train.py --algo TD3 --total-timesteps 100000 --seed 0
+python sb_train.py --algo DDPG --total-timesteps 100000 --seed 0
 ```
 
-### Classical optimization baselines
+## Classical baselines
+
+Differential evolution:
 
 ```bash
-# Differential evolution
-python classical_optimizers/scipy_optimization.py
-
-# Bayesian optimization
-python classical_optimizers/bayesian_optimization.py
+python classical_optimizers/scipy_optimization.py --seed 0
 ```
 
-## Configuration
+Bayesian optimization:
 
-Training is configured through `config.json` or `config.yaml`. The main parameter groups are:
+```bash
+python classical_optimizers/bayesian_optimization.py \
+  --backend bayes_opt \
+  --n-calls 500 \
+  --seed 0
+```
 
-| Section       | Key parameters                                                       |
-|---------------|----------------------------------------------------------------------|
-| `platform`    | `elegant_path`, `sdds_path`, `os_type`                               |
-| `simulation`  | `input_beamline_file`, `input_beam_file`, `beamline_name`            |
-| `environment` | `init_num_particles` (default: 1000), `n_bins` (default: 5), `stage` |
-| `training`    | `n_episodes`, `seed`, `greedy` (exploration noise scale)             |
-| `agent`       | `agent_type`, `alpha`, `beta`, `batch_size`, `gamma`, `tau`          |
-| `logging`     | `results_path`, `logger_file_name`                                   |
+The Bayesian script also supports `--backend skopt`.
 
-The `stage` parameter controls curriculum learning. When set to `null`, the full beamline (all 37 parameters) is optimized. Integer values (1--4) activate progressively larger subsets of the beamline, as described in the paper.
+## Required inputs and generated files
 
-## Sample Input and Output
+`machine.lte` is the example VEPP-5-derived beamline with 11 quadrupoles and
+four dipoles. `track.ele` is the matching Elegant command template. Runtime
+code makes seed-specific copies of these inputs and writes simulation outputs
+to generated directories such as `results_0/`, `inputs_0/`, and `observs_0/`.
 
-### Input files
+Do not commit runtime artifacts. The ignore rules cover:
 
-- `machine.lte`: Elegant lattice file defining the VEPP-5 positron injection beamline. Contains 11 quadrupole magnets (Q1L0--Q1L10), 4 dipole magnets (BM1--BM4), drift spaces, apertures (MAXAMP elements), and an RF debuncher cavity.
-- `track.ele`: Elegant command file specifying the beam properties (400 MeV central momentum, 1000 particles) and simulation outputs (sigma matrix, centroid, Twiss parameters, floor coordinates).
-
-### Output from a test run
-
-Running `python train.py` with the default configuration (`config.json`, `n_episodes=10`) produces:
-
-- **Console output**: Per-episode reward and particle transmission count.
-- **CSV log** (in `results_{seed}/`): Per-step records including episode number, reward, surviving particle count, current element, and the full set of magnet parameter values at each step.
-- **TensorBoard logs** (in `results_{seed}/`): Scalar summaries of reward and transmission for monitoring via `tensorboard --logdir=results_{seed}/`.
-
-A pretrained evaluation log is provided in `logs/ddpg_eval_3036000.csv`. Each row records one step within an evaluation episode: the episode number, cumulative reward, surviving particle count, the watch point name, and the full dictionary of magnet parameter values applied at that step. The pretrained agent achieves 72.2% particle transmission on the VEPP-5 beamline (722 out of 1000 particles reaching the beamline exit).
-
-## How It Works
-
-RLABC reformulates beamline tuning as a Markov decision process. The framework:
-
-1. **Preprocesses** the Elegant lattice file to insert diagnostic watch points before each tunable magnet (`rl_framework/Utils.py`).
-2. **Constructs** a 57-dimensional state vector at each watch point from beam statistics (percentiles), a spatial histogram, the covariance matrix, and aperture parameters (`rl_framework/Utils.py: process_particle_data`).
-3. **Runs Elegant** simulations between consecutive watch points via SDDS file exchange (`rl_framework/Elegant.py`).
-4. **Computes** a reward based on particle transmission, penalizing early beam loss (`rl_framework/Environment.py`).
-5. **Trains** an RL agent (DDPG by default) to select magnet parameters that maximize transmission (`rl_framework/Agents/DDPG.py`).
-
-The environment implements the Gymnasium interface, making it compatible with any RL library that supports this standard.
+- `logs*`, `models*`, `results*`, `observs*`, `inputs*`, `plots*`, and
+  TensorBoard summaries;
+- checkpoints, replay buffers, and optimizer result files;
+- generated Elegant lattice, tracking, SDDS, and CSV files.
 
 ## License
 
-MIT License. See the repository root for the full license text.
-
-## Contact
-
-For questions regarding the code, please contact the corresponding author: aibrahim@hse.ru
+MIT License. See `LICENSE`.

@@ -1,0 +1,66 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/
+
+# RL training artifacts
+logs/
+logs_*/
+models/
+models_*/
+sb_logs/
+sb_models/
+summary/
+plots/
+plots_*/
+training_plots/
+eval_plots/
+outputs/
+saved_*/
+
+# Elegant runtime directories
+inputs/
+inputs_*/
+observs/
+observs_*/
+results/
+results_*/
+
+# Generated checkpoints, buffers, logs, and tables
+*.pth
+*.pt
+*.ckpt
+*.pkl
+*.zip
+*.log
+*.csv
+events.out.tfevents.*
+error_log.txt
+
+# Generated Elegant/SDDS files
+elegant_input*.lte
+updated_machine*.lte
+temp_modified_machine*.lte
+machine_work*.lte
+modifide_machine_no_finalWP*.lte
+unchanged_input*.lte
+track_[0-9]*.ele
+*.sdds
+*.mag
+*.cen
+*.sig
+*.twi
+*.flo
+*.fin
+*.out

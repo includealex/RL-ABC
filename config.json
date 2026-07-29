@@ -1,8 +1,8 @@
 {
   "platform": {
-    "os_type": "darwin",
-    "elegant_path": "/Users/anwar/Downloads/sdds/darwin-x86/",
-    "sdds_path": "/Users/anwar/Downloads/sdds/defns.rpn"
+    "os_type": "linux",
+    "elegant_path": "/path/to/elegant/bin/",
+    "sdds_path": "/path/to/elegant/defns.rpn"
   },
   "simulation": {
     "override_dynamic_command": false,
@@ -23,14 +23,15 @@
     "seed": 0,
     "cpu": false,
     "load_model": false,
-    "n_episodes": 10,
+    "load_model_tag": "last",
+    "n_episodes": 10000,
     "max_steps": null,
-    "greedy": 0.05
+    "greedy": 0.5
   },
   "buffer": {
     "load_buffer_bool": false,
-    "load_buffer_filepath": "DDPG_bigbeamline_buffer.pkl",
-    "save_buffer_filepath": "rbBig_beamline_original_{seed}.pkl"
+    "load_buffer_filepath": "rbBig_beamline_original_{seed}_allvars.pkl",
+    "save_buffer_filepath": "rbBig_beamline_original_{seed}_allvars.pkl"
   },
   "agent": {
     "agent_type": "DDPG",
@@ -42,7 +43,7 @@
     "max_size": 1000000,
     "noise_type": "gaussian",
     "log_interval": 100,
-    "eval_interval": 1000,
+    "eval_interval": 100,
     "convert": true
   },
   "logging": {

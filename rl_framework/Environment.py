@@ -7,9 +7,15 @@ import random
 from rl_framework.Elegant import ElegantWrapper
 import math
 import os
+import logging
+
+
+logger = logging.getLogger(__name__)
+MAX_RESET_RETRIES = 3
+
 
 class ACCElegantEnvironment(gym.Env):
-    def __init__(self,stage = None,n_bins= 5, init_num_particles= None, results_path= ' ', input_beamline_file= "machine.lte", input_beam_file= "track", beamline_name= 'machine', output_beamline_file='updated_machine.lte', elegant_input_filename='elegant_input.lte', reset_specific_keys_bool= True, logger=None, file_handler=None, elegant_path= "/Users/anwar/Downloads/sdds/darwin-x86/", sddsPath= "/Users/anwar/Downloads/sdds/defns.rpn", override_dynamic_command= False, overridden_command= " ", seed=0):
+    def __init__(self,stage = None,n_bins= 5, init_num_particles= None, results_path= ' ', input_beamline_file= "machine.lte", input_beam_file= "track", beamline_name= 'machine', output_beamline_file='updated_machine.lte', elegant_input_filename='elegant_input.lte', reset_specific_keys_bool= True, logger=None, file_handler=None, elegant_path= "", sddsPath= "", override_dynamic_command= False, overridden_command= " ", seed=0):
         self.override_dynamic_command= override_dynamic_command
         self.overridden_command= overridden_command
         self.seed = int(seed)
@@ -32,21 +38,21 @@ class ACCElegantEnvironment(gym.Env):
             self.seed
         )
         self.wrapper = ElegantWrapper(self.input_file_path, self.input_beam_file, self.beamline_name, self.output_file, elegant_path= self.elegantPath, sddsPath= self.sddsPath, results_path= self.results_path, elegant_input_filename= self.elegant_input_filename, overrid_dynmaic_commnad=self.override_dynamic_command, overrideen_command= self.overridden_command, seed=self.seed)
-        
+
         '''
         print("#############$$$$$$$$$$$$$$$$$$$$$ Env DEBUG $$$$$$$$$$$$$$##############")
-        
+
         print("###### from Environment ######")
         print("Results Path: ", self.results_path)
         print("override_dynamic_command:  ", override_dynamic_command)
         print("overridden_command:  ", overridden_command)
         print("self.wrapper.overrid_dynmaic_commnad:  ", self.wrapper.overrid_dynmaic_commnad)
         print("self.wrapper.overrideen_command:  ", self.wrapper.overrideen_command)
-        
+
         print("###### Outside Environment ######")
         print("#############$$$$$$$$$$$$$$$$$$$$$ Env DEBUG $$$$$$$$$$$$$$##############")
         '''
-        
+
         self.reset_specific_keys_bool = reset_specific_keys_bool
         self.wrapper.reset_specific_keys_bool = self.reset_specific_keys_bool
         self.max_num_of_vars=  len(self.wrapper.chroneological_order_controllable_vars)
@@ -63,7 +69,12 @@ class ACCElegantEnvironment(gym.Env):
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(self.observation_shape,), dtype=np.float32)
         self.logger = logger
         self.file_handler = file_handler
-        
+        # When True, _log_episode records current_element as None so that
+        # evaluation rollouts are clearly distinguishable from training rows.
+        # The custom DDPG path never sets this flag (default False), so its
+        # logging behaviour is completely unchanged.
+        self.eval_mode = False
+
 
         # Initialize the stage mask if stage is not None
         if self.stage is not None:
@@ -76,7 +87,7 @@ class ACCElegantEnvironment(gym.Env):
         #keep this action space to be used for convert vars and other functions , but it will not reflect the actual action space.
         action_low = []
         action_high = []
-        
+
         for var in variables:
             if "K1" in var:
                 action_low.append(-20)
@@ -91,7 +102,7 @@ class ACCElegantEnvironment(gym.Env):
 
         action_low = np.array(action_low, dtype=np.float64)
         action_high = np.array(action_high, dtype=np.float64)
-    
+
         self.action_space_fake = spaces.Box(low=action_low, high=action_high)
         self.action_space_fake.n = self.action_space_fake.low.size
 
@@ -101,7 +112,7 @@ class ACCElegantEnvironment(gym.Env):
 
         self.action_space = spaces.Box(low=action_low, high=action_high)
         self.action_space.n = self.action_space.low.size
-    
+
     def _convert_variables(self, values):
         """Convert values from the range [-1, 1] to the correct range based on the variable names."""
         converted_variables = []
@@ -110,9 +121,9 @@ class ACCElegantEnvironment(gym.Env):
             range_max = self.action_space.high[i]
             converted_variable = value * (range_max - range_min) / 2 + (range_max + range_min) / 2
             converted_variables.append(converted_variable)
-            
+
         return np.round(converted_variables,4)
-    
+
     def _get_stage_mask(self):
         """
         Generate a stage mask based on the current stage.
@@ -127,16 +138,92 @@ class ACCElegantEnvironment(gym.Env):
         # Iterate through the stages and accumulate the count of variables to control
         for i in range(self.stage):
             self.iteration = i
-            count += self._check_number_of_variables_to_be_set_at_this_iteration()
+            count_current, _ = self._check_number_of_variables_to_be_set_at_this_iteration()
+            count += count_current
             stage_mask[:count] = 1
 
         return stage_mask
-    
+
+    def _observation_dim(self):
+        return 16 + self.n_bins ** 2 + 1 + 1 + 10 + 4
+
+    def _fallback_observation(self):
+        dim = getattr(self, "observation_shape", self._observation_dim())
+        return np.zeros(dim, dtype=np.float32)
+
+    def _log_simulation_error(self, context, error_message=""):
+        message = f"{context} (seed={self.seed}): {error_message}\n"
+        logger.warning(message.strip())
+        with open("error_log.txt", "a") as error_file:
+            error_file.write(message)
+
+    def _make_wrapper(self):
+        return ElegantWrapper(
+            self.input_file_path,
+            self.input_beam_file,
+            self.beamline_name,
+            self.output_file,
+            elegant_path=self.elegantPath,
+            sddsPath=self.sddsPath,
+            results_path=self.results_path,
+            elegant_input_filename=self.elegant_input_filename,
+            overrid_dynmaic_commnad=self.override_dynamic_command,
+            overrideen_command=self.overridden_command,
+            seed=self.seed,
+        )
+
+    def _run_reset_simulation(self):
+        last_error = "unknown error"
+        for attempt in range(1, MAX_RESET_RETRIES + 1):
+            try:
+                self.wrapper = self._make_wrapper()
+                self.wrapper.reset_specific_keys_bool = self.reset_specific_keys_bool
+                if self.wrapper.max_itteration == 0:
+                    raise RuntimeError("Lattice preprocessing produced no watch points")
+
+                values = np.zeros(len(self.wrapper.chroneological_variables))
+                elegant_input, success, dict_vars = self.wrapper.run_elegant_simulation(values)
+                if not success:
+                    raise RuntimeError(
+                        self.wrapper.last_elegant_error or "Elegant simulation failed on reset"
+                    )
+
+                observations, reward, output_file, done = self.wrapper.get_results(
+                    self.initial_number_of_particles
+                )
+                if observations is None:
+                    raise RuntimeError("get_results returned None observation on reset")
+                return observations, reward
+            except Exception as exc:
+                last_error = str(exc)
+                logger.warning(
+                    "Reset attempt %s/%s failed for seed=%s: %s",
+                    attempt,
+                    MAX_RESET_RETRIES,
+                    self.seed,
+                    exc,
+                )
+
+        self._log_simulation_error("reset", last_error)
+        return self._fallback_observation(), 0
+
     def reset(self, seed=None, options=None):
         """Reset the environment to the initial state."""
         if seed is not None and int(seed) != self.seed:
+            old_seed = self.seed
             self.seed = int(seed)
             self.inputs_dir = f"inputs_{self.seed}"
+            # Update all seeded filenames/paths from old seed to new seed so
+            # the newly-created .ele file references the correct paths.
+            self.elegant_input_filename = self.elegant_input_filename.replace(
+                f"_{old_seed}.", f"_{self.seed}."
+            )
+            self.results_path = self.results_path.replace(
+                f"_{old_seed}/", f"_{self.seed}/"
+            )
+            self.output_file = self.output_file.replace(
+                f"_{old_seed}.", f"_{self.seed}."
+            )
             self.input_beam_file = create_seeded_tracking_file(
                 self.base_input_beam_file,
                 self.elegant_input_filename,
@@ -152,74 +239,61 @@ class ACCElegantEnvironment(gym.Env):
         self._set_initial_number_of_particles(self.initial_number_of_particles)
         self.done = False
         self.reward = 0.0
-        #self.wrapper= ElegantWrapper(self.input_file_path, self.input_beam_file,self.beamline_name, self.output_file)
-        self.wrapper = ElegantWrapper(self.input_file_path, self.input_beam_file, self.beamline_name, self.output_file, elegant_path= self.elegantPath, sddsPath= self.sddsPath, results_path= self.results_path, elegant_input_filename= self.elegant_input_filename, overrid_dynmaic_commnad=self.override_dynamic_command, overrideen_command= self.overridden_command, seed=self.seed)
-        self.wrapper.reset_specific_keys_bool = self.reset_specific_keys_bool
         self.iteration = 0
         self.previous_mask_len = 0
         self.mask_len = 0
         self.actions_ = np.ones((len(self.variables),))
-        # Run the simulation with the converted action values
-        values=np.zeros((len(self.variables)))
-        elegant_input, success, dict_vars = self.wrapper.run_elegant_simulation(values)
-        # Get the results of the simulation
-        observations, reward, output_file, done = self.wrapper.get_results(self.initial_number_of_particles)
+        observations, reward = self._run_reset_simulation()
 
-        if reward != 0: # to make sure we don't devide by zero.
-            self.initial_reward= reward
-            self.number_of_particle_prev= self.initial_reward
+        if reward != 0:
+            self.initial_reward = reward
+            self.number_of_particle_prev = self.initial_reward
 
-        # Preprocess the observation data
-        observation = observations
-
-        """get the correct shape of the state"""
-        
-        """
-        Returns 1D numpy array with:
-        - Median, IQR, 10th, 90th percentiles for x, y, xp, yp (4 * 4 = 16)
-        - 2D histogram bin counts for (x, y) (n_bins * n_bins = 25 for n_bins=5)
-        - Number of particles (1)
-        - Fraction of particles inside ellipse (1)
-        - Covariance matrix upper triangle for x, y, xp, yp (10 elements)
-        - Ellipse parameters a_previous, b_previous and a_next, b_next (4)
-        Total size: 16 + 25 + 1 + 1 + 10 + 2 = 57
-        """
-        self.observation_shape = 16 + self.n_bins**2 + 1 + 1 + 10 + 4  # 55 elements. NOT DYNAMIC
-
-        self.observation = observation #np.array([observation])
+        self.observation_shape = self._observation_dim()
+        self.observation = observations
         return self.observation, {}
-    
+
     def _set_initial_number_of_particles(self,new):
         self.initial_number_of_particles = new
 
-        
+
     def _check_number_of_variables_to_be_set_at_this_iteration(self):
-        """Check the number of variables to be set at this iteration."""
-        #current_var = self.variables[self.iteration]
-        count= 0
-        if self.iteration< len(self.wrapper.chroneological_order_controllable_vars):
-            current_var=self.wrapper.chroneological_order_controllable_vars[self.iteration]
-            #current_var = self.variables[self.previous_mask_len]
-            #base_name = current_var.replace("K1", "").replace("VKICK", "").replace("HKICK", "").replace("FSE", "")
-            #count = sum(1 for var in self.variables if base_name in var)
-            #count = sum(1 for var in self.variables if current_var in var)
-            for var in self.variables:
-                base_name = var.replace("K1", "").replace("VKICK", "").replace("HKICK", "").replace("FSE", "")
-                if current_var == base_name:
-                    count+=1
-                
-        return count
-    
+        """Return the action-variable counts for the current and next elements."""
+        element_order = self.wrapper.chroneological_order_controllable_vars
+        current_var = None
+        next_var = None
+
+        if 0 <= self.iteration < len(element_order):
+            current_var = element_order[self.iteration]
+        if 0 <= self.iteration + 1 < len(element_order):
+            next_var = element_order[self.iteration + 1]
+
+        count_current = 0
+        count_next = 0
+        for var in self.variables:
+            base_name = (
+                var.replace("K1", "")
+                .replace("HKICK", "")
+                .replace("VKICK", "")
+                .replace("FSE", "")
+            )
+            if current_var is not None and current_var == base_name:
+                count_current += 1
+            if next_var is not None and next_var == base_name:
+                count_next += 1
+
+        return count_current, count_next
+
     def _get_mask(self, mask_len):
         """Generate a mask for the current iteration.
-        len(variables)= 10 
+        len(variables)= 10
         mask_len=3
         output= [1, 1, 1, 0, 0, 0, 0, 0, 0, 0]
         """
         mask = np.zeros(len(self.variables))
         mask[:mask_len] = 1
         return mask
-    
+
     def _get_action_mask(self, count):
         mask= np.zeros(self.action_space.n)
         if count == 3:
@@ -227,17 +301,17 @@ class ACCElegantEnvironment(gym.Env):
         elif count==1:
             mask[-count] = 1
 
-        
+
         return mask
 
     def _get_new_action(self, count, action):
         new_action = None
         if count == 3:
             new_action= np.zeros(3)
-            new_action= action[:count]  
+            new_action= action[:count]
         elif count==1:
             new_action= np.zeros(1)
-            new_action= action[-count] 
+            new_action= action[-count:]
 
         return new_action
 
@@ -253,8 +327,8 @@ class ACCElegantEnvironment(gym.Env):
         np.array: The combined action values with the new variables updated and previous variables unchanged.
 
         Example:
-        inputs: 
-        len(variables)= 10 
+        inputs:
+        len(variables)= 10
         mask_len=5
         previous_mask_len= 3
 
@@ -266,7 +340,7 @@ class ACCElegantEnvironment(gym.Env):
         action_mask = np.zeros(len(self.variables))
         #action_mask[self.previous_mask_len:self.mask_len] = 1
         action_mask[self.previous_mask_len:self.mask_len]= action
-        
+
         # Apply the mask to the new action values
         ###new_action = action * action_mask
 
@@ -278,15 +352,15 @@ class ACCElegantEnvironment(gym.Env):
         #previous_Actions = (previous_actions_mask * self.actions_) + new_action #!!!!
         previous_Actions = (previous_actions_mask * self.actions_) + action_mask
         return previous_Actions
-    
+
 
     def _log_episode(self, info):
         """Log the episode information."""
-        ep_info= {
+        ep_info = {
             'reward': info["reward"],
             'done': info["done"],
             'itteration': info["itteration"],
-            'current_element': info["output_file"],
+            'current_element': None if self.eval_mode else info["output_file"],
             'dict_vars': info["dict_vars"],
             'initial_number_of_particles': info["initial_number_of_particles"],
             'number_of_particles': info["number_of_particles"]
@@ -294,21 +368,70 @@ class ACCElegantEnvironment(gym.Env):
         self.logger.writerow(ep_info)
         self.file_handler.flush()
 
+
+    def _get_returned_action_mask(self, count):
+        """
+        4-dim mask for actor/critic (Scenario 1), independent of self.action_mask / self.mask.
+        Action layout: [K1, HKICK, VKICK, FSE]
+
+        count==3 (quad):  [1,1,1,0]  or  [1,0,0,0] if reset_specific_keys_bool
+        count==1 (bend):  [0,0,0,1]  or  [0,0,0,0] if reset_specific_keys_bool
+        """
+        mask = np.zeros(self.action_space.n, dtype=np.float64)  # 4,
+        if count == 3:
+            if self.reset_specific_keys_bool:
+                mask[0] = 1.0          # [1,0,0,0]
+            else:
+                mask[:3] = 1.0         # [1,1,1,0]
+        elif count == 1:
+            if not self.reset_specific_keys_bool:
+                mask[-1] = 1.0         # [0,0,0,1]
+            # else: stay [0,0,0,0]
+        return mask
+
     def step(self, action, convert=False):
         """
         Perform a training step in the environment with stage learning applied.
         """
-
-        info = {}
+        # Keep the policy-space action separate from the converted simulator
+        # action. The replay buffer always expects the fixed 4-D layout:
+        # [K1, HKICK, VKICK, FSE].
+        returned_action = np.asarray(action, dtype=np.float64).ravel().copy()
         if convert:
             action = self._convert_variables(action)
         # Determine the number of variables to set in this iteration
-        num_of_vars_iteration = self._check_number_of_variables_to_be_set_at_this_iteration()
-        self.mask_len = self.previous_mask_len + num_of_vars_iteration
-        self.action_mask = self._get_action_mask(num_of_vars_iteration)
-        new_actions= self._get_new_action(num_of_vars_iteration, action)
+        num_of_vars_iteration_current, num_of_vars_iteration_next = self._check_number_of_variables_to_be_set_at_this_iteration()
+
+        if num_of_vars_iteration_current not in (1, 3):
+            raise RuntimeError(
+                "The current controllable element must expose either one or three "
+                f"variables; got {num_of_vars_iteration_current} at iteration {self.iteration}"
+            )
+        if num_of_vars_iteration_next not in (0, 1, 3):
+            raise RuntimeError(
+                "The next controllable element must expose zero, one, or three "
+                f"variables; got {num_of_vars_iteration_next} at iteration {self.iteration}"
+            )
+
+        # These actor/critic masks are deliberately independent of
+        # self.action_mask and self.mask, which are used by the environment.
+        returned_mask = self._get_returned_action_mask(num_of_vars_iteration_current)
+        returned_mask_next = self._get_returned_action_mask(num_of_vars_iteration_next)
+
+        if returned_action.size != self.action_space.n:
+            raise ValueError(
+                f"Expected a {self.action_space.n}-D action, got {returned_action.size} values"
+            )
+
+        # Preserve the fixed 4-D shape and zero only the policy components that
+        # do not apply to the current element.
+        returned_action *= returned_mask
+        self.mask_len = self.previous_mask_len + num_of_vars_iteration_current
+        self.action_mask = self._get_action_mask(num_of_vars_iteration_current)
+        new_actions= self._get_new_action(num_of_vars_iteration_current, action)
+
         self.mask = self._get_mask(self.mask_len)
-        
+
 
         self.actions_ = self._correct_action(new_actions)
 
@@ -317,37 +440,57 @@ class ACCElegantEnvironment(gym.Env):
             self.actions_ = self.actions_ * self.stage_mask
 
         self.previous_mask_len = self.mask_len
-        elegant_input, success, dict_vars = self.wrapper.run_elegant_simulation(self.actions_) 
-        
-        '''
-        print("@@@@@@@@@@@@@@@@@@@@@@@@@")
-        print(elegant_input)
-        print("@@@@@@@@@@@@@@@@@@@@@@@@@")
-        '''
+        elegant_input, success, dict_vars = self.wrapper.run_elegant_simulation(self.actions_)
 
         if not os.path.exists(self.inputs_dir):
             os.makedirs(self.inputs_dir)
-        
-        try:
-            # Save the elegant input for debugging
-            with open(os.path.join(self.inputs_dir, "elegant_input" + str(self.iteration) + ".txt"), "w") as file:
-                file.write(elegant_input)
-        except TypeError as e:
-                    print(f"Warning: {e}")
 
-        # Get the results of the simulation
-        observations_dataframe, reward, output_file, done = self.wrapper.get_results(self.initial_number_of_particles)
+        if elegant_input is not None:
+            try:
+                with open(os.path.join(self.inputs_dir, "elegant_input" + str(self.iteration) + ".txt"), "w") as file:
+                    file.write(elegant_input)
+            except (TypeError, OSError) as e:
+                logger.warning("Could not save elegant input debug file: %s", e)
 
-        #### reward= (1000* reward)/ self.initial_reward #updating reward
-        self.number_of_particle_curr= reward
-        
+        observations_dataframe, reward, output_file, done = self.wrapper.get_results(
+            self.initial_number_of_particles
+        )
+
+        if not success or observations_dataframe is None:
+            self._log_simulation_error(
+                "step",
+                self.wrapper.last_elegant_error or f"iteration={self.iteration}",
+            )
+            self.observation = self._fallback_observation()
+            self.done = True
+            self.reward = -1.0
+            info = {
+                "dict_vars": dict_vars if dict_vars is not None else {},
+                "actions": self.actions_,
+                "itteration": self.iteration,
+                "reward": self.reward,
+                "output_file": output_file,
+                "done": self.done,
+                "masked_action": self.actions_,
+                "observations_dataframe": self.observation,
+                "initial_number_of_particles": self.initial_number_of_particles,
+                "number_of_particles": self.wrapper.get_num_particles(),
+                "returned_action": returned_action,
+                "returned_mask": returned_mask,
+                "returned_mask_next": returned_mask_next,
+            }
+            self._log_episode(info)
+            return self.observation, float(self.reward), True, False, info
+
+        self.number_of_particle_curr = reward
+
         reward= self.number_of_particle_curr/ self.initial_reward
-        
+
 
         #reward= (reward)/ self.initial_reward
         #print("reward <= 3 ==", reward <= 3)
         self.done= done
-        if self.number_of_particle_curr <= 3:   
+        if self.number_of_particle_curr <= 3:
             self.done = True  # We lost all particles
             reward -= math.sqrt(abs((self.max_num_of_vars**2)- ((self.iteration+1)**2)))*(1/self.max_num_of_vars) #add penality for losing all particles before the end of the beamline
             #reward = -1 * math.sqrt(abs((self.max_num_of_vars**2)- ((self.iteration+1)**2)))*(100/self.max_num_of_vars) #add penality for losing all particles before the end of the beamline
@@ -368,36 +511,35 @@ class ACCElegantEnvironment(gym.Env):
                 self.done = True  # We reached the end of the beamline
 
         self.reward = reward # sum of rewards
-        
+
         # self.reward += reward
         # ReMOVE THIS LINE
         if observations_dataframe is not None:
             #observations_dataframe.to_csv('observs/REMOVE_observations_' + str(self.iteration) + "__" + output_file + '.csv', index=False)
 
             # Preprocess the observation data
-            
+
             self.observation =  observations_dataframe
 
             #self.reward is actual reward "independant of the number of initial particles"
             #whereas reward is the previous reward defined by previous function
         elif self.observation is None:
-            # Log the error information
-            with open("error_log.txt", "a") as error_file:
-                error_file.write(f"Iteration: {self.iteration}, Output File: {output_file}\n")
-            
+            self.observation = self._fallback_observation()
+            self._log_simulation_error("step", f"missing observation at iteration={self.iteration}")
+
         #UNDERSTANDING ITERATIONS A BIT
-        #extra precautions so we don't get over the range of variables that we can set. in reality 
+        #extra precautions so we don't get over the range of variables that we can set. in reality
         #there should be two iterations one for watch points "this defines how many states we have
-        #and how many watch points" the other one is for elements "this one defines how many magnets 
-        #do we have" in theory they should be the same but in reality we donc't care about the first 
-        #observation so stage=2 checks until WBM1_1, and sets the first three elements so these two iterations are one number apart 
-        if (self.iteration< self.max_num_of_vars): 
+        #and how many watch points" the other one is for elements "this one defines how many magnets
+        #do we have" in theory they should be the same but in reality we donc't care about the first
+        #observation so stage=2 checks until WBM1_1, and sets the first three elements so these two iterations are one number apart
+        if (self.iteration< self.max_num_of_vars):
             self.iteration += 1
         else:
             print("itteration is over the max length of the beamline")
-            self.done= True 
+            self.done= True
             print("we set done to True")
-        
+
         if self.stage == self.iteration:
             self.done= True
 
@@ -413,7 +555,10 @@ class ACCElegantEnvironment(gym.Env):
             "masked_action": self.actions_,
             "observations_dataframe": observations_dataframe,
             "initial_number_of_particles": self.initial_number_of_particles,
-            "number_of_particles": self.wrapper.get_num_particles()
+            "number_of_particles": self.wrapper.get_num_particles(),
+            "returned_action": returned_action,
+            "returned_mask": returned_mask,
+            "returned_mask_next": returned_mask_next,
         }
 
         # Log the episode information
@@ -422,10 +567,10 @@ class ACCElegantEnvironment(gym.Env):
 
 
         return self.observation, float(self.reward), self.done, False, info
-    
+
     def get_number_of_particles(self):
         return self.wrapper.num_particles
-    
+
     def stage_learning(self):
         #this function is for curriculim learning, we will train to solve the first stage then make
         #our task more complicated incrementally by increasing the stages.

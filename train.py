@@ -92,6 +92,15 @@ class RLConfig:
         self.seed = train_cfg.get('seed', 0)
         self.cpu = train_cfg.get('cpu', False)
         self.load_model = train_cfg.get('load_model', True)
+        # "last" = resume from ddpg_checkpoint_last.pth; "best" = load ddpg_actor_best.pth
+        self.load_model_tag = str(train_cfg.get('load_model_tag', 'last')).lower()
+        if self.load_model_tag in ('latest',):
+            self.load_model_tag = 'last'
+        if self.load_model_tag not in ('last', 'best'):
+            raise ValueError(
+                f"Invalid training.load_model_tag={self.load_model_tag!r}; "
+                "expected 'last' (or 'latest') or 'best'"
+            )
         self.n_episodes = train_cfg.get('n_episodes', 10)
         self.max_steps = train_cfg.get('max_steps', None)
         self.greedy = train_cfg.get('greedy', 0.05)
@@ -249,6 +258,7 @@ class RLConfig:
                 seed=self.seed,
                 exp=self.tb_file_name,
                 load=self.load_model,
+                load_tag=self.load_model_tag,
                 convert=self.convert
             )
         else:
@@ -276,8 +286,8 @@ class RLConfig:
                 agent.load_models(step)
                 logger.info(f"Loaded agent weights from step {step}")
             else:
-                agent.load_models()
-                logger.info("Loaded latest agent weights")
+                agent.load_models(tag=self.load_model_tag)
+                logger.info(f"Loaded agent weights (tag={self.load_model_tag})")
         else:
             logger.info("Training from scratch (not loading pre-trained weights)")
 
@@ -319,7 +329,7 @@ class RLConfig:
         config_str += f"  TensorBoard Log: {self.tb_file_name}\n"
         
         if self.load_model:
-            config_str += f"  Load Model: True (warm start)\n"
+            config_str += f"  Load Model: True (warm start, tag={self.load_model_tag})\n"
         else:
             config_str += f"  Load Model: False (train from scratch)\n"
         

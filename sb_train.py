@@ -190,8 +190,13 @@ Examples:
 # ---------------------------------------------------------------------------
 # Environment factory
 # ---------------------------------------------------------------------------
-def make_env(cfg: dict, seed: int) -> ACCElegantEnvironment:
-    """Build ACCElegantEnvironment from the shared config dict."""
+def make_env(cfg: dict, seed: int, algo_tag: str = "sb") -> ACCElegantEnvironment:
+    """Build ACCElegantEnvironment from the shared config dict.
+
+    The reward/action CSV is named with an ``{algo_tag}_{seed}`` suffix so that
+    DDPG, SAC, and TD3 runs at the same seed write to separate files and never
+    overwrite each other.
+    """
     platform_cfg = cfg.get("platform", {})
     sim_cfg = cfg.get("simulation", {})
     env_cfg = cfg.get("environment", {})
@@ -205,7 +210,19 @@ def make_env(cfg: dict, seed: int) -> ACCElegantEnvironment:
         results_path += "/"
     Path(results_path).mkdir(parents=True, exist_ok=True)
 
-    logger_file = sub(log_cfg.get("logger_file_name", f"sb_train_{seed}.csv"))
+    # Inject _{algo_tag}_{seed} before the file extension so each run gets its
+    # own file, e.g. big_beamline_original_ddpg_0.csv / ..._sac_0.csv.
+    # We apply the {seed} substitution first (to handle any other {seed} uses
+    # in the path), then strip any trailing _{seed} from the stem before
+    # appending _{algo_tag}_{seed} — avoiding a doubled seed in the filename.
+    raw_logger_file = sub(log_cfg.get("logger_file_name", f"sb_train_{seed}.csv"))
+    stem, _, ext = raw_logger_file.rpartition(".")
+    if not stem:
+        stem, ext = raw_logger_file, "csv"
+    _seed_suffix = f"_{seed}"
+    if stem.endswith(_seed_suffix):
+        stem = stem[: -len(_seed_suffix)]
+    logger_file = f"{stem}_{algo_tag}_{seed}.{ext}"
     headers = tuple(
         log_cfg.get(
             "headers",
@@ -234,7 +251,7 @@ def make_env(cfg: dict, seed: int) -> ACCElegantEnvironment:
         output_beamline_file=sub(
             sim_cfg.get("output_beamline_file", "updated_machine.lte")
         ),
-        input_beam_file=sim_cfg.get("input_beam_file", "track"),
+        input_beam_file=sub(sim_cfg.get("input_beam_file", "track")),
         elegant_input_filename=sub(
             sim_cfg.get("elegant_input_filename", "elegant_input.lte")
         ),
@@ -286,7 +303,7 @@ def main():
 
     # --- Environment ---------------------------------------------------------
     log.info("Setting up environment ...")
-    env = make_env(cfg, seed)
+    env = make_env(cfg, seed, algo_tag)
     log.info(f"Observation space : {env.observation_space}")
     log.info(f"Action space      : {env.action_space}")
 
@@ -304,15 +321,23 @@ def main():
     if args.algo in ("DDPG", "TD3"):
         noise_type = args.noise_type or agent_cfg.get("noise_type", "gaussian")
         n_actions = env.action_space.shape[-1]
+
+        # Scale sigma per-dimension by the action range so the noise is
+        # meaningful for every dim. The custom DDPG injects noise in normalised
+        # [-1, 1] space (args.noise_sigma ≈ fraction of that range), so we
+        # apply the same fraction to each physical dim's half-range here.
+        half_range = (env.action_space.high - env.action_space.low) / 2.0
+        sigma_vec = args.noise_sigma * half_range
+
         if noise_type == "gaussian":
             action_noise = NormalActionNoise(
                 mean=np.zeros(n_actions),
-                sigma=args.noise_sigma * np.ones(n_actions),
+                sigma=sigma_vec,
             )
         elif noise_type == "ou":
             action_noise = OrnsteinUhlenbeckActionNoise(
                 mean=np.zeros(n_actions),
-                sigma=args.noise_sigma * np.ones(n_actions),
+                sigma=sigma_vec,
             )
         # noise_type == "none" → action_noise stays None
 
@@ -407,25 +432,34 @@ def main():
 
 
 def _run_eval(env, model, n_episodes: int):
-    """Deterministic rollout and report."""
-    for ep in range(n_episodes):
-        obs, _ = env.reset()
-        done = False
-        total_reward = 0.0
-        step = 0
-        info = {}
+    """Deterministic rollout and report.
 
-        while not done:
-            action, _ = model.predict(obs, deterministic=True)
-            obs, reward, done, truncated, info = env.step(action)
-            total_reward += reward
-            step += 1
+    Sets env.eval_mode = True so that _log_episode records current_element as
+    None for evaluation rows, making them clearly distinguishable from training
+    rows in the reward/action CSV.
+    """
+    env.eval_mode = True
+    try:
+        for ep in range(n_episodes):
+            obs, _ = env.reset()
+            done = False
+            total_reward = 0.0
+            step = 0
+            info = {}
 
-        particles = info.get("number_of_particles", 0)
-        log.info(
-            f"  Episode {ep + 1}: reward={total_reward:.4f}, "
-            f"particles={particles}, steps={step}"
-        )
+            while not done:
+                action, _ = model.predict(obs, deterministic=True)
+                obs, reward, done, truncated, info = env.step(action)
+                total_reward += reward
+                step += 1
+
+            particles = info.get("number_of_particles", 0)
+            log.info(
+                f"  Episode {ep + 1}: reward={total_reward:.4f}, "
+                f"particles={particles}, steps={step}"
+            )
+    finally:
+        env.eval_mode = False
 
 
 if __name__ == "__main__":

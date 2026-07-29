@@ -149,19 +149,20 @@ def create_seeded_tracking_file(input_beam_file, elegant_input_filename, results
 
 #remove alll watch points that we didn't add
 # and update the line definitions accordingly
-# Save the original file content into 'unchanged_input.lte'
+# Save the original file content into a backup file (seed-specific when backup_path is set).
 # This function removes all 'watch' elements from the .lte file and updates line definitions accordingly.
-def remove_watch_points(file_path):
+def remove_watch_points(file_path, backup_path="unchanged_input.lte"):
     """
     Removes all 'watch' elements from the .lte file and updates line definitions accordingly.
-    Saves the original file content into 'unchanged_input.lte'.
+    Saves the original file content into *backup_path* before modifying *file_path*.
 
     :param file_path: Path to the .lte file
+    :param backup_path: Path for the pre-modification backup copy
     """
     # Save the original file content
     with open(file_path, 'r') as file:
         original_content = file.read()
-    with open("unchanged_input.lte", 'w') as backup_file:
+    with open(backup_path, 'w') as backup_file:
         backup_file.write(original_content)
 
     # Read the file and process its content

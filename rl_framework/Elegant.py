@@ -4,6 +4,7 @@ import numpy as np
 
 import os
 import glob
+import shutil
 from io import StringIO
 import pandas as pd
 import subprocess
@@ -23,6 +24,10 @@ import plotly.io as pio
 from scipy import interpolate
 import platform
 import math
+import logging
+
+
+logger = logging.getLogger(__name__)
 
 
 
@@ -31,7 +36,7 @@ hv.extension("bokeh")
 
 
 class ElegantWrapper:
-    def __init__(self, input_beamline_file, input_beam_file, beamline_name, output_beamline_file='updated_machine.lte', elegant_path= "/Users/anwar/Downloads/sdds/darwin-x86/", sddsPath= "/Users/anwar/Downloads/sdds/defns.rpn", results_path= "results/", elegant_input_filename='elegant_input.lte', overrid_dynmaic_commnad= False, overrideen_command= " ", seed=0):
+    def __init__(self, input_beamline_file, input_beam_file, beamline_name, output_beamline_file='updated_machine.lte', elegant_path= "", sddsPath= "", results_path= "results/", elegant_input_filename='elegant_input.lte', overrid_dynmaic_commnad= False, overrideen_command= " ", seed=0):
         self.overrid_dynmaic_commnad= overrid_dynmaic_commnad #set to true only when you want to override the dynamic command
         self.seed = int(seed)
         self.elegant_input_filename = elegant_input_filename
@@ -57,8 +62,8 @@ class ElegantWrapper:
         self.chroneological_variables= self._order_vars()
         self.max_itteration = len(self.chronolgical_order_watch_points)
         self.Done = False  # end of the line "the last watch point" or losing all particles
-        self.elegantPath= elegant_path #"/Users/anwar/Downloads/sdds/darwin-x86/" #default vaulue 
-        self.sddsPath= sddsPath #"/Users/anwar/Downloads/sdds/defns.rpn" #sddsPath #
+        self.elegantPath= elegant_path
+        self.sddsPath= sddsPath
         self.reset_specific_keys_bool = False
         # Detect the operating system
         self.os_type = platform.system().lower()
@@ -66,21 +71,22 @@ class ElegantWrapper:
         self.dfTrackCen = None
         self.dfTrackSig = None
         self.Ax_pos = None
-    
-        
+        self.last_elegant_error = None
+
+
     def _order_vars(self):
         """
         Orders variables chronologically based on controllable variables' order.
-        
+
         Returns:
-            list: A list of variables ordered according to the chronological order 
+            list: A list of variables ordered according to the chronological order
                 of their base names in self.chroneological_order_controllable_vars.
         """
         chroneological_variables = []
         #variables= ['Q1L0K1', 'Q1L0HKICK', 'Q1L0VKICK', 'Q1L1K1', 'Q1L1HKICK', 'Q1L1VKICK', 'Q1L2_1K1', 'Q1L2_1HKICK', 'Q1L2_1VKICK', 'Q1L2_2K1', 'Q1L2_2HKICK', 'Q1L2_2VKICK', 'Q1L3_1K1', 'Q1L3_1HKICK','Q1L3_1VKICK', 'Q1L3_2K1', 'Q1L3_2HKICK', 'Q1L3_2VKICK', 'Q1L4_1K1', 'Q1L4_1HKICK', 'Q1L4_1VKICK', 'Q1L4_2K1', 'Q1L4_2HKICK', 'Q1L4_2VKICK', 'Q1L7K1','Q1L7HKICK', 'Q1L7VKICK', 'Q1L9K1', 'Q1L9HKICK', 'Q1L9VKICK', 'Q1L10K1', 'Q1L10HKICK', 'Q1L10VKICK', 'BM1FSE', 'BM2FSE', 'BM3FSE', 'BM4FSE']
         #chroneological_order_controllable_vars =['Q1L0', 'Q1L1', 'BM1', 'Q1L2_1', 'BM2', 'Q1L3_1', 'Q1L4_1', 'Q1L3_2', 'BM3', 'Q1L2_2', 'BM4', 'Q1L7', 'Q1L4_2', 'Q1L9', 'Q1L10']
         remaining_vars = self.variables.copy()  # Make a copy to track remaining variables
-        
+
         # First, process variables that match the base names in chronological order
         for name in self.chroneological_order_controllable_vars:
             matching_vars = []
@@ -98,22 +104,22 @@ class ElegantWrapper:
             # Remove them from the remaining variables
             for var in matching_vars:
                 remaining_vars.remove(var)
-        
+
         # Add any remaining variables that didn't match any base name (if needed)
         chroneological_variables.extend(remaining_vars)
-        
+
         return chroneological_variables
 
 
-    def sdds2df(self, sdds_file, columns="all"): 
+    def sdds2df(self, sdds_file, columns="all"):
         if columns == "all":
             command = str(self.elegantPath) + "sddsquery " + str(sdds_file) + " -columnlist"
             columns_process = subprocess.run(command, shell=True, capture_output=True, text=True)
-            
+
             # Check if the command was successful
             if columns_process.returncode != 0:
                 raise RuntimeError(f"Error running sddsquery: {columns_process.stderr}")
-            
+
             # Access the stdout attribute to get the output as a string
             columns = columns_process.stdout.splitlines()
         elif isinstance(columns, list):
@@ -121,39 +127,46 @@ class ElegantWrapper:
             pass
         else:
             raise ValueError("Invalid value for 'columns'. Must be 'all' or a list of column names.")
-        
+
         # Join the columns into a single string with commas
         col_str = "-col=" + ",".join(columns)
         command = str(self.elegantPath + "sdds2stream " + sdds_file + " " + col_str + " -pipe=out")
-        
+
         # Run the sdds2stream command
         out = subprocess.run(command, shell=True, capture_output=True, text=True)
-        
+
         # Check if the command was successful
         if out.returncode != 0:
             raise RuntimeError(f"Error running sdds2stream: {out.stderr}")
-        
+
         # Use the stdout attribute to get the command output
         DATA = StringIO("\n".join(out.stdout.splitlines()))
         df = pd.read_csv(DATA, names=columns, sep='\s+')
-        
+
         return df
-    
-    
-    def _preprocess_lattice_file(self, temp_output_file="temp_modified_machine.lte"):
+
+
+    def _preprocess_lattice_file(self):
         """Preprocesses the lattice file by adding watch points and modifying initial content."""
-        #remove all watch points that we didn't add from the original file
-        remove_watch_points(self.input_file_path)
-        # Add strategic watch points to the lattice file
-        add_watch_points(self.input_file_path, "modifide_machine_no_finalWP.lte", results_path=self.results_path)
-        #add final watch point to the end of the beamline
-        add_final_watch_point("modifide_machine_no_finalWP.lte",self.output_file, self.beamline_name, results_path=self.results_path)
-        # Get a list with the watch points
+        work_lattice = f"machine_work_{self.seed}.lte"
+        modifide_lattice = f"modifide_machine_no_finalWP_{self.seed}.lte"
+        temp_modified_lattice = f"temp_modified_machine_{self.seed}.lte"
+        unchanged_input = f"unchanged_input_{self.seed}.lte"
+
+        # Copy shared machine.lte so parallel seed jobs do not mutate it in place
+        shutil.copy2(self.input_file_path, work_lattice)
+        remove_watch_points(work_lattice, backup_path=unchanged_input)
+        add_watch_points(work_lattice, modifide_lattice, results_path=self.results_path)
+        add_final_watch_point(modifide_lattice, self.output_file, self.beamline_name, results_path=self.results_path)
         u_parsed_data = parse_lattice_file(self.output_file)
         wtach_points = [key for key, value in u_parsed_data.items() if value['type'] == "watch point"]
-        # Modify the initial content of the lattice file
-        formatted_lattice, variables = change_initial_content(self.output_file, temp_output_file)
-        #print(formatted_lattice)
+        formatted_lattice, variables = change_initial_content(self.output_file, temp_modified_lattice)
+        if not wtach_points:
+            logger.warning(
+                "No watch points found in %s after preprocessing (seed=%s).",
+                self.output_file,
+                self.seed,
+            )
         return wtach_points, formatted_lattice, variables
 
     def _replace_variables(self, variables, input_string):
@@ -177,12 +190,16 @@ class ElegantWrapper:
         return pattern.sub(replacer, input_string)
 
     def _get_elegant_input(self, values):
+        '''print("+++++ Debugging in Elegant.py +++++")
+        print("values: ", values, "len", len(values))
+        print("+++++ End Debugging in Elegant.py +++++")'''
         self.dict_variables = create_dict_from_lists(self.chroneological_variables, values)
         # Check if the self.formatted_lattice is not empty
         if self.reset_specific_keys_bool:
             # If the self.reset_specific_keys is True, reset the specific keys in the dictionary
             self.dict_variables = reset_specific_keys(self.dict_variables)
-            
+
+
         if self.formatted_lattice:
             # If the self.formatted_lattice is not empty, replace the variables with the values
             elegant_input = self._replace_variables(self.dict_variables, self.formatted_lattice)
@@ -227,31 +244,34 @@ class ElegantWrapper:
             print("Not None")
         print("Elegant input file")
         print(elegant_input)
-        
+
         print("self.overrid_dynmaic_commnad:  ", self.overrid_dynmaic_commnad)
         print("self.overrideen_command: ", self.overrideen_command)
-         self.elegant_path = "/Users/anwar/Downloads/sdds/darwin-x86/"
-            self.sdds_path = "/Users/anwar/Downloads/sdds/defns.rpn"
+         self.elegant_path = "/path/to/elegant/bin/"
+            self.sdds_path = "/path/to/elegant/defns.rpn"
         '''
-        
+
         # Check if the elegant_input is not empty
         if elegant_input:
-            
+
              # Extract directory from input_beamline_file
             input_dir = os.path.dirname(self.input_file_path)
-            elegant_input_path = os.path.join(input_dir, self.elegant_input_filename)
-            
+            if os.path.dirname(self.elegant_input_filename):
+                elegant_input_path = self.elegant_input_filename
+            else:
+                elegant_input_path = os.path.join(input_dir, self.elegant_input_filename)
+
             '''print("DEBUG: Input file path:", self.input_file_path)
             print("DEBUG: Extracted directory:", input_dir)
             print("DEBUG: Elegant input will be written to:", elegant_input_path)'''
-            
+
             # Create the elegant input file and write the content
             with open(elegant_input_path, "w") as file:
                 file.write(elegant_input)
             # If not empty, run elegant simulation
             if self.overrid_dynmaic_commnad == True:
                 command= f"{self.overrideen_command} {self.input_beam_file}.ele"
-            else: 
+            else:
                 if self.os_type == "linux":
                     #command = f"mpirun -np 24 Pelegant {self.input_beam_file}.ele"
                     command= f"{self.elegantPath}elegant -rpnDefns={self.sddsPath} {self.input_beam_file}.ele"
@@ -269,14 +289,23 @@ class ElegantWrapper:
             '''
 
             result = subprocess.run(command, shell=True, capture_output=True, text=True)
-            #Check if the simulation was successful
             if result.returncode == 0:
+                self.last_elegant_error = None
                 return elegant_input, True, self.dict_variables
-            else:
-                print("Error: Elegant simulation failed.")
-                return None, False, None
+            self.last_elegant_error = (
+                result.stderr.strip()
+                or result.stdout.strip()
+                or f"Elegant exited with code {result.returncode}"
+            )
+            logger.warning(
+                "Elegant simulation failed (seed=%s): %s",
+                self.seed,
+                self.last_elegant_error[:1000],
+            )
+            print(f"Error: Elegant simulation failed. {self.last_elegant_error[:500]}")
+            return None, False, None
         else:
-            # If empty, return an error message
+            self.last_elegant_error = "Elegant input file is empty."
             print("Error: Elegant input file is empty.")
             return None, False, None
 
@@ -298,62 +327,79 @@ class ElegantWrapper:
             if node['type'] == "QUAD" or node['type'] == "quad" or node['type'] == "SBEND" or node['type'] == "spend":
                 self.chroneological_order_controllable_vars.append(node['name'])
         return graph
- 
+
+
+    def _fallback_observation(self):
+        return np.zeros(55, dtype=np.float32)
 
     def get_results(self, initialNumParticles = 0):
-        # We are at a final iteration of the episode
-        if self.itteration <= (self.max_itteration-1):
-            if not self._check_files_created_successfully():
-                time.sleep(5)
-            output_file = self.chronolgical_order_watch_points[self.itteration]
-            output_file_path = f"{self.results_path}{output_file}.sdds"
-            command = str(self.elegantPath + "sdds2stream " + output_file_path + " -col=x,xp,y,yp,t,p,dt,particleID -pipe=out")
-            result = subprocess.run(command, shell=True, capture_output=True, text=True)
-            output = result.stdout
-            error = result.stderr
-            if error:
-                self.errors[self.itteration] = error
-            data = StringIO(output)
-            observation_df = pd.read_csv(data, names=['x', 'xp', 'y', 'yp', 't', 'p', 'dt', 'particleID'], sep='\s+')
-            observation_df.to_csv('sdds_output.csv', index=False)
-            reward = len(observation_df) 
-            self.num_particles = reward
-            self.graph = process_lte_file_to_graph(self.output_file, self.beamline_name)
-            self.Done = False
-            if output_file == "final_WP":
-                self.Done = True
-
-            # --- New observation logic ---
-            # Save the observation as a CSV for processing
-            # !!!!! we don't neccerly need to save the file to .csv then reread it because we already have one that is already read
-            csv_path = os.path.join(self.observs_dir, f"obs_{output_file}.csv")
-            if not os.path.exists(self.observs_dir):
-                os.makedirs(self.observs_dir)
-            observation_df[['x', 'y', 'xp', 'yp']].to_csv(csv_path, index=False)
-            # Use the new process_particle_data function
-            obs_result = process_particle_data(
-                file_path=csv_path,
-                watch_point=output_file,
-                graph=self.graph,
-                watch_points=self.chronolgical_order_watch_points,
-                n_bins=5,
-                initialNumParticles=initialNumParticles
+        if self.max_itteration == 0:
+            logger.warning(
+                "get_results called with max_itteration=0 (seed=%s, itteration=%s).",
+                self.seed,
+                self.itteration,
             )
-            if obs_result is not None:
-                observation = obs_result['nn_representation']
-            else:
-                observation = np.zeros(55)  # fallback to zeros if processing fails
+            return self._fallback_observation(), 0, None, True
+        if self.itteration > (self.max_itteration - 1):
+            logger.warning(
+                "get_results past beamline end (seed=%s, itteration=%s, max=%s).",
+                self.seed,
+                self.itteration,
+                self.max_itteration,
+            )
+            return self._fallback_observation(), 0, None, True
+        try:
+            return self._read_simulation_results(initialNumParticles)
+        except Exception as exc:
+            logger.warning(
+                "get_results failed (seed=%s, itteration=%s): %s",
+                self.seed,
+                self.itteration,
+                exc,
+            )
+            return self._fallback_observation(), 0, None, True
 
-            self.itteration += 1
-            return observation, reward, output_file, self.Done
+    def _read_simulation_results(self, initialNumParticles=0):
+        if not self._check_files_created_successfully():
+            time.sleep(5)
+        output_file = self.chronolgical_order_watch_points[self.itteration]
+        output_file_path = f"{self.results_path}{output_file}.sdds"
+        command = str(self.elegantPath + "sdds2stream " + output_file_path + " -col=x,xp,y,yp,t,p,dt,particleID -pipe=out")
+        result = subprocess.run(command, shell=True, capture_output=True, text=True)
+        output = result.stdout
+        error = result.stderr
+        if error:
+            self.errors[self.itteration] = error
+        data = StringIO(output)
+        observation_df = pd.read_csv(data, names=['x', 'xp', 'y', 'yp', 't', 'p', 'dt', 'particleID'], sep='\s+')
+        observation_df.to_csv(f"sdds_output_{self.seed}.csv", index=False)
+        reward = len(observation_df)
+        self.num_particles = reward
+        self.graph = process_lte_file_to_graph(self.output_file, self.beamline_name)
+        self.Done = False
+        if output_file == "final_WP":
+            self.Done = True
+
+        csv_path = os.path.join(self.observs_dir, f"obs_{output_file}.csv")
+        if not os.path.exists(self.observs_dir):
+            os.makedirs(self.observs_dir)
+        observation_df[['x', 'y', 'xp', 'yp']].to_csv(csv_path, index=False)
+        obs_result = process_particle_data(
+            file_path=csv_path,
+            watch_point=output_file,
+            graph=self.graph,
+            watch_points=self.chronolgical_order_watch_points,
+            n_bins=5,
+            initialNumParticles=initialNumParticles
+        )
+        if obs_result is not None:
+            observation = obs_result['nn_representation']
         else:
-            print("ERROR: in get results function")
-            print("MOST LIKELY WE ALREADY REACHED THE END OF THE BEAMLINE")
-            print("self.itteration", self.itteration)
-            print("self.max_itteration", self.max_itteration)
-            print("##############")
-            return None, 0, None, True
-        
+            observation = self._fallback_observation()
+
+        self.itteration += 1
+        return observation, reward, output_file, self.Done
+
     def get_results_for_Scipy(self, initialNumParticles = 0):
         if not self._check_files_created_successfully():
             time.sleep(5)
@@ -367,8 +413,8 @@ class ElegantWrapper:
             self.errors[self.itteration] = error
         data = StringIO(output)
         observation_df = pd.read_csv(data, names=['x', 'xp', 'y', 'yp', 't', 'p', 'dt', 'particleID'], sep='\s+')
-        observation_df.to_csv('sdds_output.csv', index=False)
-        reward = len(observation_df) 
+        observation_df.to_csv(f"sdds_output_{self.seed}.csv", index=False)
+        reward = len(observation_df)
         self.num_particles = reward
         self.graph = process_lte_file_to_graph(self.output_file, self.beamline_name)
 
@@ -378,7 +424,7 @@ class ElegantWrapper:
         if not os.path.exists(self.observs_dir):
             os.makedirs(self.observs_dir)
         observation_df[['x', 'y', 'xp', 'yp']].to_csv(csv_path, index=False)
-        
+
         return reward, self.Done
 
     ##############################################
@@ -439,7 +485,7 @@ class ElegantWrapper:
                 color='black',
                 alpha=0.3
             ),
-            hv.opts.Curve('fx', 
+            hv.opts.Curve('fx',
                 show_grid=True,
                 xaxis='bottom',
                 yaxis='left',
@@ -447,7 +493,7 @@ class ElegantWrapper:
                 height=200,
                 width=800,
                 color='red',
-                alpha=0.7, 
+                alpha=0.7,
                 line_width=3),
 
             hv.opts.Curve('fy',
@@ -456,9 +502,9 @@ class ElegantWrapper:
                 yaxis='left',
                 show_frame=False,
                 height=200,
-                width=800, 
-                color='blue', 
-                alpha=0.7, 
+                width=800,
+                color='blue',
+                alpha=0.7,
                 line_width=3),
             hv.opts.Curve('Charge',
                 show_grid=True,
@@ -467,24 +513,24 @@ class ElegantWrapper:
                 show_frame=False,
                 show_title=False,
                 height=200,
-                width=800, 
-                color='blue', 
-                alpha=0.7, 
+                width=800,
+                color='blue',
+                alpha=0.7,
                 line_width=3),
             hv.opts.Curve('Aper',
                 height=200,
-                width=800, 
+                width=800,
                 show_grid=True,
                 show_frame=False,
                 show_title=False,
                 color='gray',
-                alpha=0.5, 
+                alpha=0.5,
                 line_width=3)
 )
 
         self.mag = hv.Curve(dfMagnet, kdims=self.dim_s, vdims=['Profile', 'ElementName'], group='mag')
         return self.mag
-    
+
     def _plot_magnet_profile(self):
         df_mag = self.sdds2df(f'{self.results_path}beamline.mag')
         #print(df_mag)
@@ -514,7 +560,7 @@ class ElegantWrapper:
         Sy = hv.Curve((self.dfTrackSig.s, self.dfTrackSig.sigma_y), label='σy', kdims=self.dim_s, vdims=dim_y, group='fy')
 
         return (Sx * Sy + self.mag).cols(1)
-        
+
     # Can't be called before running the simulation and self.plot_magnets function
     def plot_cen(self):
         if self.mag == None:
@@ -524,7 +570,7 @@ class ElegantWrapper:
         dim_Q = hv.Dimension('Charge Q', range=(0, None), unit='nC')
 
         #%opts Curve.Charge (color='blue', alpha=0.7, line_width=3)
-        
+
         Charge = hv.Curve((self.dfTrackCen.s, self.dfTrackCen.Charge * 1e9), label='Charge', kdims=self.dim_s, vdims=dim_Q, group='Charge')
 
         return (Charge + self.mag).cols(1)
@@ -541,7 +587,7 @@ class ElegantWrapper:
         dfTwissSdds = self._analyzeTwissSddd()
         dfTwissSdds.to_csv("people.csv")
 
-        
+
         dim_p = hv.Dimension('p', unit='MeV/c', label="p", range=(0, None))
 
         #%opts Curve.Aper (color='gray', alpha=0.5, line_width=3)
@@ -575,13 +621,13 @@ class ElegantWrapper:
     def visulize(self, values):
         self.run_elegant_simulation(values)
         self.mag = self.plot_magnets()
-        sigs = self.plot_sig() 
+        sigs = self.plot_sig()
         #sigs= None
         cents = self.plot_cen()
         twiss = self.plot_twiss()
         centrids = self.plot_centroids()
         return self.mag, sigs, cents, twiss, centrids
-    
+
     def plot_betatron(self):
         """Plot betatron functions (beta_x and beta_y)."""
         df = self.sdds2df(f'{self.results_path}twiss.twi')
@@ -592,15 +638,15 @@ class ElegantWrapper:
 
         fig.update_yaxes(title_text='β<sub>x,y</sub> (m)', showgrid=True) #(title_text='β<sub>x,y</sub> (m)', showgrid=True, range=(0,50))
         fig.update_xaxes(title_text="s (m)", showgrid=True)
-        
+
         mag = self._plot_magnet_profile()
         fig.add_trace(mag, row=2, col=1)
 
-        fig.update_layout(height=600, hovermode='x unified') 
+        fig.update_layout(height=600, hovermode='x unified')
 
-        
+
         return fig
-    
+
     def plot_dispersion(self):
         """Plot dispersion functions (D_x and D_y)."""
         df = self.sdds2df(f'{self.results_path}twiss.twi')
@@ -611,14 +657,14 @@ class ElegantWrapper:
 
         fig.update_yaxes(title_text='D<sub>x,y</sub> (m)', showgrid=True)
         fig.update_xaxes(title_text="s (m)", showgrid=True)
-        
+
         mag = self._plot_magnet_profile()
         fig.add_trace(mag, row=2, col=1)
 
         fig.update_layout(height=600, hovermode='x unified')
 
         return fig
-    
+
     def plot_tune_diagram(self):
         """Generate the tune diagram with resonance lines."""
         twi = f'{self.results_path}twiss.twi'
@@ -631,46 +677,42 @@ class ElegantWrapper:
         diag = f'{self.results_path}resdiag.sdds'
         nux_int = np.floor(nux)
         nuy_int = np.floor(nuy)
-        
+
         command= str(self.elegantPath + "sddsresdiag "+ diag + " -order=8 -integerTunes="+ str(nux_int)+ ","+ str(nuy_int)+ " -superperiodicity=1")
         subprocess.run(command, shell=True)
-        #!/Users/anwar/Downloads/sdds/darwin-x86/sddsresdiag $diag -order=8 -integerTunes=$nux_int,$nuy_int -superperiodicity=1
         png = f"{self.results_path}tune_diagram.png"
         #command= str(self.elegantPath + "sddsplot -device=png -output="+ png+ " -col=nux,nuy -graph=line,type=15 "+ diag)
         #subprocess.run(command, shell=True)
-        #!/Users/anwar/Downloads/sdds/darwin-x86/sddsplot -device=png -output=$png -col=nux,nuy -graph=line,type=15 $diag
         png = f"{self.results_path}image.png"
         command= str(self.elegantPath + "sddsplot -device=png -output="+ png+ " -split=page -col=nux,nuy -graph=line,type=15 -filter=par,Order,1,4 "+ diag+ " -par=nux,nuy -graph=sym,type=1,subtype=1,scale=3,thick=3 "+ twi)
         subprocess.run(command, shell=True)
-        #!/Users/anwar/Downloads/sdds/darwin-x86/sddsplot -device=png -output=$png -split=page -col=nux,nuy -graph=line,type=15 -filter=par,Order,1,4 $diag -par=nux,nuy -graph=sym,type=1,subtype=1,scale=3,thick=3 $twi
-        
+
         return png, Latex('ν<sub>x</sub>=%.3f, ν<sub>y</sub>=%.3f' % (nux, nuy))
-    
+
     def plot_chromaticity(self):
         """Plot chromaticity values (xi_x, xi_y)."""
         xi_x = float(self._sddspar(f'{self.results_path}twiss.twi', 'dnux/dp'))
         xi_y = float(self._sddspar(f'{self.results_path}twiss.twi', 'dnuy/dp'))
         return Latex(r'$\xi_x=%.2f,\ \xi_y=%.2f$' % (xi_x, xi_y))
-    
+
     '''def _sddspar(self, file_name, par_name):
         """Extracts a scalar parameter from an SDDS file."""
         command= str(self.elegantPath + "sdds2stream "+file_name+ " -par="+par_name  )
         s = subprocess.run(command , shell=True, capture_output=True, text=True)
-       # s = !/Users/anwar/Downloads/sdds/darwin-x86/sdds2stream $file_name -par=$par_name
         try:
             return float(s[0])
         except ValueError:
             return s[0]'''
-        
+
     def _sddspar(self, file_name, par_name):
         """Retrieve a parameter value from an SDDS file."""
         command = f"{self.elegantPath}sdds2stream {file_name} -par={par_name}"
         result = subprocess.run(command, shell=True, capture_output=True, text=True)
-        
+
         # Check if the command was successful
         if result.returncode != 0:
             raise RuntimeError(f"Error running sdds2stream: {result.stderr}")
-        
+
         # Return the output as a string
         return result.stdout.strip()
 
@@ -678,7 +720,7 @@ class ElegantWrapper:
         """Retrieve the s parameter value from an SDDS file."""
         s_value = self._sddspar(w_file, "s")
         return float(s_value)
-    
+
     def get_mag_3d(self, ele_folder='', Z0=0, X0=0, Y0=0, theta0=0, Element_width=0.3):
         """Generate 3D magnet profile."""
         xyz_file = os.path.join(ele_folder, f"{self.results_path}xyz.sdds")
@@ -710,7 +752,7 @@ class ElegantWrapper:
         df_mag['Y'] += Y0
 
         return df_mag
-    
+
     def plot_mag_3d(self, df_mag):
         df=df_mag
         fig = go.Figure()
@@ -744,7 +786,7 @@ class ElegantWrapper:
     def process_w(self, input_w, output_w="w.sdds", z0=0):
         """Processes the W file by defining required columns."""
         output_w = os.path.join(self.results_path, output_w)  # Proper path joining
-        
+
         command = [
             os.path.join(self.elegantPath, "sddsprocess"),  # Full path to executable
             input_w,
@@ -756,17 +798,17 @@ class ElegantWrapper:
             "-define=col,yp_mrad,yp,1e3,*,symbol=y',units=mrad",
             "-define=col,E_GeV,p,0.511e-3,*,symbol=E,units=GeV"
         ]
-        
+
         # Run without shell=True for better security and reliability
         result = subprocess.run(command, capture_output=True, text=True)
         if result.returncode != 0:
             raise RuntimeError(f"sddsprocess failed: {result.stderr}")
         return output_w  # Return the full output path'''
-    
+
     def process_w(self, input_w, output_w="w.sdds", z0=0):
         """Processes the W file by defining required columns."""
         output_w = os.path.join(self.results_path, output_w)
-        
+
         command = [
             os.path.join(self.elegantPath, "sddsprocess"),
             input_w,
@@ -779,19 +821,18 @@ class ElegantWrapper:
             "-define=col,yp_mrad,yp 1e3 *,symbol=y',units=mrad",
             "-define=col,E_GeV,p 0.511e-3 *,symbol=E,units=GeV"
         ]
-        
+
         result = subprocess.run(command, capture_output=True, text=True)
         if result.returncode != 0:
             raise RuntimeError(f"sddsprocess failed: {result.stderr}")
-        
+
         # Verify the file was created
         if not os.path.exists(output_w):
             raise FileNotFoundError(f"Output file not created: {output_w}")
-        
+
         return output_w  # This is critical - must return the path
-        
+
     def get_s_value(self, w_file):
         """Retrieve the s parameter value from an SDDS file."""
         s_value = self._sddspar(w_file,"s")#subprocess.run(["sdds2stream", w_file, "-par=s"], capture_output=True, text=True, shell=True)
         return float(s_value)
-                

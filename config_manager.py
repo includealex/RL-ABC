@@ -111,21 +111,21 @@ def create_arg_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Run with default config.yaml
+  # Run with default config.json
   python train.py
 
   # Run with custom config file
   python train.py --config my_config.yaml
 
   # Override specific parameters
-  python train.py --config config.yaml --training.n_episodes 100 --training.cpu true
+  python train.py --config config.json --training.n_episodes 100 --training.cpu true
 
   # JSON config file
   python train.py --config config.json
 
   # Multiple parameter overrides
   python train.py \\
-    --config config.yaml \\
+    --config config.json \\
     --training.n_episodes 10000 \\
     --training.seed 42 \\
     --agent.alpha 0.0002 \\
@@ -137,8 +137,8 @@ Examples:
     parser.add_argument(
         "--config",
         type=str,
-        default="config.yaml",
-        help="Path to configuration file (YAML or JSON). Default: config.yaml",
+        default="config.json",
+        help="Path to configuration file (YAML or JSON). Default: config.json",
     )
 
     # Platform/Simulation Arguments
@@ -210,6 +210,12 @@ Examples:
         "--training.load_model",
         type=lambda x: x.lower() == "true",
         help="Load pre-trained model weights (true/false)",
+    )
+    parser.add_argument(
+        "--training.load_model_tag",
+        type=str,
+        choices=["last", "latest", "best"],
+        help="Which checkpoint to load when load_model is true: last/latest or best",
     )
     parser.add_argument(
         "--training.greedy",
@@ -314,7 +320,7 @@ def parse_args(args: Optional[list] = None) -> argparse.Namespace:
     return parser.parse_args(args)
 
 
-def load_config(config_path: str = "config.yaml") -> Dict[str, Any]:
+def load_config(config_path: str = "config.json") -> Dict[str, Any]:
     """Load configuration from file"""
     manager = ConfigManager()
     return manager.load(config_path)
