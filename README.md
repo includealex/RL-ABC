@@ -1,17 +1,31 @@
 # RL-ABC: Reinforcement Learning for Accelerator Beamline Control
 
-RL-ABC (RLABC) converts Elegant beamline lattice and command files into a
-Gymnasium environment for reinforcement-learning-based accelerator tuning.
-This repository contains the runnable framework used for:
+RL-ABC (RLABC) converts Elegant lattice and command files into a Gymnasium
+environment for reinforcement-learning-based accelerator tuning.
 
-> A. Ibrahim, F. Ratnikov, M. Kaledin, A. Petrenko, and D. Derkach,
-> “RL-ABC: Reinforcement Learning for Accelerator Beamline Control,”
+> A. Ibrahim, F. Ratnikov, M. Kaledin, A. Petrenko, and D. Derkach,<br>
+> “RL-ABC: Reinforcement Learning for Accelerator Beamline Control,”<br>
 > *Computer Physics Communications* (2026).
 
-The repository intentionally contains source code and required example inputs
-only. Training logs, model checkpoints, replay buffers, generated Elegant
-files, observations, plots, and optimization results are excluded and covered
-by `.gitignore`.
+This branch contains source code and the required example inputs only. Generated
+logs, checkpoints, replay buffers, observations, Elegant outputs, and plots are
+excluded by `.gitignore`.
+
+## Tested environment
+
+RL-ABC is tested with **Python 3.10.20**. Use Python 3.10; Python 3.14 is not
+supported by this release. The direct dependencies used in testing are pinned
+with exact `==` versions in `requirements.txt`, including:
+
+- PyTorch 2.10.0
+- Gymnasium 1.2.3
+- Stable-Baselines3 2.7.1
+- NumPy 2.2.6
+- pandas 2.3.3
+- SciPy 1.15.3
+- scikit-learn 1.7.2
+- Bayesian Optimization 3.3.0
+- scikit-optimize 0.10.2
 
 ## Repository contents
 
@@ -20,82 +34,202 @@ by `.gitignore`.
 ├── train.py
 ├── sb_train.py
 ├── config_manager.py
+├── runtime_checks.py
 ├── config.json
 ├── machine.lte
 ├── track.ele
 ├── requirements.txt
 ├── rl_framework/
-│   ├── __init__.py
 │   ├── Environment.py
 │   ├── Elegant.py
 │   ├── Utils.py
-│   └── Agents/
-│       ├── __init__.py
-│       └── DDPG.py
+│   └── Agents/DDPG.py
 └── classical_optimizers/
-    ├── README.md
     ├── scipy_optimization.py
     └── bayesian_optimization.py
 ```
 
-## Prerequisites
+## 1. Download and install
 
-- Python 3.10
-- Elegant and its SDDS Toolkit
-
-RLABC calls the external `elegant`, `sdds2stream`, `sddsquery`, and
-`sddsprocess` executables. Install Elegant from the
-[Advanced Photon Source software page](https://www.aps.anl.gov/Accelerator-Operations-Physics/Software).
-
-## Installation
+Clone the clean branch and enter the repository directory:
 
 ```bash
+git clone --branch clean-code-2026 \
+  https://github.com/Anwar9Ibrahim/RL-ABC.git
+cd RL-ABC
+```
+
+Create an isolated Python 3.10 environment:
+
+```bash
+python3.10 --version
 python3.10 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
+python -m pip check
 ```
 
-Edit `config.json` before running:
+On Windows, activate with:
+
+```powershell
+.venv\Scripts\activate
+```
+
+`pip check` should print `No broken requirements found`.
+
+## 2. Install Elegant and SDDS
+
+Elegant is an external accelerator simulation program, not a Python package.
+Install Elegant and the SDDS Toolkit from the
+[Advanced Photon Source software page](https://www.aps.anl.gov/Accelerator-Operations-Physics/Software).
+
+RL-ABC requires these files:
+
+- `elegant`
+- `sdds2stream`
+- `sddsquery`
+- `sddsprocess`
+- `defns.rpn`
+
+Edit the `platform` section of `config.json`:
 
 ```json
 {
   "platform": {
     "os_type": "linux",
-    "elegant_path": "/path/to/elegant/bin/",
-    "sdds_path": "/path/to/elegant/defns.rpn"
+    "elegant_path": "/absolute/path/to/elegant/bin/",
+    "sdds_path": "/absolute/path/to/elegant/defns.rpn"
   }
 }
 ```
 
-Keep the trailing slash on `elegant_path`. Use `os_type: "darwin"` on macOS.
-For an HPC command such as `srun -n 2 Pelegant`, set
+Keep the trailing slash on `elegant_path`. Use `"darwin"` for macOS. For an
+HPC command such as `srun -n 2 Pelegant`, set
 `simulation.override_dynamic_command` to `true` and configure
 `simulation.overridden_command`.
 
-## Training
+Paths may also be supplied without editing the file:
 
-The default configuration starts a fresh, all-variable DDPG run with 1,000
-particles, 10,000 episodes, and Gaussian exploration noise decaying from 0.5
-to 0.05:
+```bash
+python train.py --check-setup \
+  --platform.os_type linux \
+  --platform.elegant_path /absolute/path/to/elegant/bin/ \
+  --platform.sdds_path /absolute/path/to/elegant/defns.rpn
+```
+
+## 3. Input files
+
+The input files must be in the **same directory as `train.py`**:
+
+- `machine.lte` — Elegant beamline lattice;
+- `track.ele` — Elegant tracking command file.
+
+Both example inputs are included in the repository. Run commands from the
+repository root (`cd RL-ABC`). To use another beamline, place its `.lte` and
+`.ele` files beside `train.py` and update these `config.json` values:
+
+```json
+{
+  "simulation": {
+    "input_beamline_file": "machine.lte",
+    "input_beam_file": "track",
+    "beamline_name": "machine"
+  }
+}
+```
+
+`input_beam_file` is the filename stem, so `track` refers to `track.ele`.
+
+## 4. Check the installation
+
+Before starting a long run:
+
+```bash
+python train.py --check-setup
+```
+
+This checks:
+
+- Python is version 3.10;
+- the input `.lte` and `.ele` files exist;
+- Elegant and the required SDDS executables exist;
+- `defns.rpn` exists;
+- the principal installed package versions.
+
+The command exits without training and prints `RL-ABC setup check passed` when
+the environment is ready.
+
+## 5. Run a short end-to-end smoke test
+
+This command trains from scratch for one short episode with 100 particles:
+
+```bash
+python train.py \
+  --training.n_episodes 1 \
+  --training.max_steps 1 \
+  --environment.init_num_particles 100 \
+  --training.cpu true \
+  --agent.batch_size 2 \
+  --agent.max_size 100
+```
+
+It exercises Elegant, the Gymnasium environment, the DDPG agent, evaluation,
+replay-buffer saving, and checkpoint saving.
+
+## 6. Train from scratch
+
+The committed `config.json` is deliberately configured for a fresh run:
+
+```json
+{
+  "training": {
+    "load_model": false,
+    "n_episodes": 10000,
+    "greedy": 0.5
+  },
+  "buffer": {
+    "load_buffer_bool": false
+  }
+}
+```
+
+After configuring the Elegant paths, start training with:
 
 ```bash
 python train.py
 ```
 
-Common overrides:
+No checkpoint or replay buffer is required. The old failure involving
+`models_0/ddpg_checkpoint_last.pth` cannot occur in the default from-scratch
+configuration because checkpoint loading is disabled.
+
+For another seed:
 
 ```bash
-python train.py --training.seed 1 --training.cpu true
-python train.py --training.n_episodes 100 --environment.init_num_particles 1000
+python train.py --training.seed 1
 ```
 
-The paper’s 30,000-episode from-scratch schedule can be reproduced in two
-phases so that the noise reaches 0.05 after the first 10,000 episodes and then
-stays there:
+For K-only training:
 
 ```bash
+python train.py --environment.reset_specific_keys_bool true
+```
+
+For all 37 control variables, keep
+`environment.reset_specific_keys_bool` set to `false`.
+
+## Paper training schedule
+
+The 30,000-episode from-scratch schedule consists of 10,000 episodes while the
+Gaussian exploration scale decays from 0.5 to 0.05, followed by 20,000
+episodes at 0.05:
+
+```bash
+# Phase 1: starts from scratch and creates the checkpoint and replay buffer
 python train.py
+
+# Phase 2: explicitly continues from the files created by phase 1
 python train.py \
   --training.load_model true \
   --buffer.load_buffer_bool true \
@@ -103,12 +237,9 @@ python train.py \
   --training.greedy 0.05
 ```
 
-The first command creates the checkpoint and replay buffer used by the second
-command. These generated files remain local and are not tracked by Git.
-
-For K-only training, set `environment.reset_specific_keys_bool` to `true`.
-Setting it to `false` activates all 37 control variables: quadrupole strengths,
-horizontal and vertical kicks, and dipole field-scaling errors.
+Only set `training.load_model` or `buffer.load_buffer_bool` to `true` when the
+corresponding local file exists. If a requested file is absent, RL-ABC now
+reports its exact path and explains how to start from scratch.
 
 ## Stable-Baselines3
 
@@ -137,19 +268,40 @@ python classical_optimizers/bayesian_optimization.py \
 
 The Bayesian script also supports `--backend skopt`.
 
-## Required inputs and generated files
+## Generated files
 
-`machine.lte` is the example VEPP-5-derived beamline with 11 quadrupoles and
-four dipoles. `track.ele` is the matching Elegant command template. Runtime
-code makes seed-specific copies of these inputs and writes simulation outputs
-to generated directories such as `results_0/`, `inputs_0/`, and `observs_0/`.
+Training creates seed-specific directories such as `models_0/`, `logs_0/`,
+`plots_0/`, `results_0/`, `inputs_0/`, and `observs_0/`. It also creates
+checkpoints, replay buffers, CSV logs, and temporary Elegant/SDDS files. These
+files remain local and are ignored by Git.
 
-Do not commit runtime artifacts. The ignore rules cover:
+## Troubleshooting
 
-- `logs*`, `models*`, `results*`, `observs*`, `inputs*`, `plots*`, and
-  TensorBoard summaries;
-- checkpoints, replay buffers, and optimizer result files;
-- generated Elegant lattice, tracking, SDDS, and CSV files.
+### Unsupported Python
+
+If RL-ABC reports an unsupported Python version, recreate the environment with
+Python 3.10. Do not reuse a Python 3.14 virtual environment.
+
+### Setup check fails
+
+Run `python train.py --check-setup`. The message lists each missing input,
+executable, or SDDS definitions file.
+
+### Checkpoint or replay buffer is missing
+
+Train from scratch:
+
+```bash
+python train.py \
+  --training.load_model false \
+  --buffer.load_buffer_bool false
+```
+
+### Elegant simulation fails
+
+Verify the configured paths, then run the exact generated `.ele` command
+directly to inspect Elegant’s error output. Also confirm that `machine.lte` and
+`track.ele` are beside `train.py`.
 
 ## License
 

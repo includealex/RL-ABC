@@ -27,6 +27,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from runtime_checks import require_supported_python
+
+require_supported_python()
+
 import numpy as np
 
 from rl_framework.Elegant import ElegantWrapper

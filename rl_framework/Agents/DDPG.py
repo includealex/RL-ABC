@@ -265,9 +265,6 @@ class DDPGAgent:
         self.best_eval_log = None
         self.recent_eval_logs = deque(maxlen=10)
 
-        if self.load:
-            self.load_models(tag=self.load_tag)
-
     '''def choose_action(self, state, greedy=0.5, log_source="train"):
         state = torch.FloatTensor(state).to(device)
         action = self.actor(state).cpu().data.numpy().flatten()
@@ -593,10 +590,22 @@ class DDPGAgent:
 
     def load_models(self, tag="last"):
         if tag == "best":
-            self.actor.load_state_dict(torch.load(os.path.join(self.models_dir, "ddpg_actor_best.pth"), map_location=self.device))
+            checkpoint_path = os.path.join(self.models_dir, "ddpg_actor_best.pth")
+            if not os.path.isfile(checkpoint_path):
+                raise FileNotFoundError(
+                    f"Requested checkpoint not found: {checkpoint_path}. "
+                    "Set `training.load_model` to false to train from scratch."
+                )
+            self.actor.load_state_dict(torch.load(checkpoint_path, map_location=self.device))
             print("Loaded best actor for evaluation.")
         else:
-            checkpoint = torch.load(os.path.join(self.models_dir, "ddpg_checkpoint_last.pth"), map_location=self.device)
+            checkpoint_path = os.path.join(self.models_dir, "ddpg_checkpoint_last.pth")
+            if not os.path.isfile(checkpoint_path):
+                raise FileNotFoundError(
+                    f"Requested checkpoint not found: {checkpoint_path}. "
+                    "Set `training.load_model` to false to train from scratch."
+                )
+            checkpoint = torch.load(checkpoint_path, map_location=self.device)
             self.actor.load_state_dict(checkpoint['actor'])
             self.critic.load_state_dict(checkpoint['critic'])
             self.actor_target.load_state_dict(checkpoint['actor_target'])

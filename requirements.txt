@@ -1,29 +1,27 @@
-# Python dependencies for RL-ABC
-# Install with: pip install -r requirements.txt
+# Exact direct dependencies used to test RL-ABC with Python 3.10.20.
+# Install with: python -m pip install -r requirements.txt
 
-# Core ML/RL Dependencies
-gymnasium>=0.29.1
-stable-baselines3>=2.0.0
-torch>=2.0.0
+# Core ML/RL
+gymnasium==1.2.3
+stable-baselines3==2.7.1
+torch==2.10.0
 
-# Scientific Computing
-numpy>=1.21.0
-pandas>=1.3.0
-scipy>=1.7.0
-scikit-learn>=1.0.0
-bayesian-optimization>=1.4.0
-scikit-optimize>=0.10.0
+# Scientific computing and classical optimizers
+numpy==2.2.6
+pandas==2.3.3
+scipy==1.15.3
+scikit-learn==1.7.2
+bayesian-optimization==3.3.0
+scikit-optimize==0.10.2
 
-# Visualization
-matplotlib>=3.5.0
-holoviews>=1.15.0
-bokeh>=2.4.0
-plotly>=5.0.0
-
-# Logging and Monitoring
-tensorboard>=2.7.0
+# Visualization and logging
+matplotlib==3.10.8
+holoviews==1.22.1
+bokeh==3.8.2
+plotly==6.6.0
+tensorboard==2.20.0
 
 # Utilities
-pillow>=9.0.0
-PyYAML>=6.0
-ipython>=7.0.0
+pillow==12.1.1
+PyYAML==6.0.3
+ipython==8.38.0

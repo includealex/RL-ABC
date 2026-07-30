@@ -100,17 +100,25 @@ class ACCElegantEnvironment(gym.Env):
                 action_low.append(-1)
                 action_high.append(1)
 
-        action_low = np.array(action_low, dtype=np.float64)
-        action_high = np.array(action_high, dtype=np.float64)
+        action_low = np.array(action_low, dtype=np.float32)
+        action_high = np.array(action_high, dtype=np.float32)
 
-        self.action_space_fake = spaces.Box(low=action_low, high=action_high)
+        self.action_space_fake = spaces.Box(
+            low=action_low,
+            high=action_high,
+            dtype=np.float32,
+        )
         self.action_space_fake.n = self.action_space_fake.low.size
 
         #Real action space, this one to be used for the actual environment and it will also be used to define the shape of the output of the policy network.
-        action_low=   np.array([-20, -0.005, -0.005, -0.005], dtype=np.float64)
-        action_high= np.array([20, 0.005, 0.005, 0.005], dtype=np.float64)
+        action_low = np.array([-20, -0.005, -0.005, -0.005], dtype=np.float32)
+        action_high = np.array([20, 0.005, 0.005, 0.005], dtype=np.float32)
 
-        self.action_space = spaces.Box(low=action_low, high=action_high)
+        self.action_space = spaces.Box(
+            low=action_low,
+            high=action_high,
+            dtype=np.float32,
+        )
         self.action_space.n = self.action_space.low.size
 
     def _convert_variables(self, values):
@@ -209,6 +217,7 @@ class ACCElegantEnvironment(gym.Env):
 
     def reset(self, seed=None, options=None):
         """Reset the environment to the initial state."""
+        super().reset(seed=seed)
         if seed is not None and int(seed) != self.seed:
             old_seed = self.seed
             self.seed = int(seed)
@@ -250,7 +259,7 @@ class ACCElegantEnvironment(gym.Env):
             self.number_of_particle_prev = self.initial_reward
 
         self.observation_shape = self._observation_dim()
-        self.observation = observations
+        self.observation = np.asarray(observations, dtype=np.float32)
         return self.observation, {}
 
     def _set_initial_number_of_particles(self,new):
@@ -519,7 +528,10 @@ class ACCElegantEnvironment(gym.Env):
 
             # Preprocess the observation data
 
-            self.observation =  observations_dataframe
+            self.observation = np.asarray(
+                observations_dataframe,
+                dtype=np.float32,
+            )
 
             #self.reward is actual reward "independant of the number of initial particles"
             #whereas reward is the previous reward defined by previous function

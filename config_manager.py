@@ -145,7 +145,18 @@ Examples:
     parser.add_argument(
         "--platform.elegant_path",
         type=str,
-        help="Path to elegant executable",
+        help="Directory containing Elegant and SDDS executables",
+    )
+    parser.add_argument(
+        "--platform.sdds_path",
+        type=str,
+        help="Path to the SDDS defns.rpn file",
+    )
+    parser.add_argument(
+        "--platform.os_type",
+        type=str,
+        choices=["linux", "darwin", "windows"],
+        help="Operating system (linux, darwin, or windows)",
     )
     parser.add_argument(
         "--simulation.override_dynamic_command",
@@ -310,6 +321,11 @@ Examples:
         default=1,
         help="Number of episodes to evaluate (when mode=evaluate)",
     )
+    parser.add_argument(
+        "--check-setup",
+        action="store_true",
+        help="Validate Python, dependencies, input files, and Elegant/SDDS paths, then exit",
+    )
 
     return parser
 
@@ -331,7 +347,10 @@ def merge_configs(base_config: Dict[str, Any], cli_args: argparse.Namespace) -> 
     # Convert Namespace to dict and filter out None values and non-config keys
     args_dict = vars(cli_args)
     cli_config = {
-        k: v for k, v in args_dict.items() if v is not None and k not in ["config", "mode", "eval_episodes"]
+        k: v
+        for k, v in args_dict.items()
+        if v is not None
+        and k not in ["config", "mode", "eval_episodes", "check_setup"]
     }
 
     manager = ConfigManager()

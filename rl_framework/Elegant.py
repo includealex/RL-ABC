@@ -141,7 +141,7 @@ class ElegantWrapper:
 
         # Use the stdout attribute to get the command output
         DATA = StringIO("\n".join(out.stdout.splitlines()))
-        df = pd.read_csv(DATA, names=columns, sep='\s+')
+        df = pd.read_csv(DATA, names=columns, sep=r'\s+')
 
         return df
 
@@ -371,7 +371,11 @@ class ElegantWrapper:
         if error:
             self.errors[self.itteration] = error
         data = StringIO(output)
-        observation_df = pd.read_csv(data, names=['x', 'xp', 'y', 'yp', 't', 'p', 'dt', 'particleID'], sep='\s+')
+        observation_df = pd.read_csv(
+            data,
+            names=['x', 'xp', 'y', 'yp', 't', 'p', 'dt', 'particleID'],
+            sep=r'\s+',
+        )
         observation_df.to_csv(f"sdds_output_{self.seed}.csv", index=False)
         reward = len(observation_df)
         self.num_particles = reward
@@ -412,7 +416,11 @@ class ElegantWrapper:
         if error:
             self.errors[self.itteration] = error
         data = StringIO(output)
-        observation_df = pd.read_csv(data, names=['x', 'xp', 'y', 'yp', 't', 'p', 'dt', 'particleID'], sep='\s+')
+        observation_df = pd.read_csv(
+            data,
+            names=['x', 'xp', 'y', 'yp', 't', 'p', 'dt', 'particleID'],
+            sep=r'\s+',
+        )
         observation_df.to_csv(f"sdds_output_{self.seed}.csv", index=False)
         reward = len(observation_df)
         self.num_particles = reward

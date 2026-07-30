@@ -22,6 +22,10 @@ import logging
 import tempfile
 from pathlib import Path
 
+from runtime_checks import require_supported_python
+
+require_supported_python()
+
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 tempfile.tempdir = '/tmp'
 

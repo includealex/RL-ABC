@@ -6,11 +6,11 @@ This script trains a DDPG agent to optimize ACC beamline parameters.
 It supports configuration via YAML/JSON files and command-line overrides.
 
 Usage:
-    # Basic usage with default config.yaml
+    # Basic usage with default config.json
     python train.py
 
-    # With custom config file
-    python train.py --config my_config.yaml
+    # Check installation and external dependencies
+    python train.py --check-setup
 
     # Override specific parameters
     python train.py --training.n_episodes 100 --training.cpu true
@@ -24,6 +24,15 @@ For more examples:
 
 import sys
 import os
+
+from runtime_checks import (
+    SetupError,
+    dependency_versions,
+    require_supported_python,
+    validate_runtime_config,
+)
+
+require_supported_python()
 
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 
@@ -91,7 +100,7 @@ class RLConfig:
         train_cfg = config_dict.get('training', {})
         self.seed = train_cfg.get('seed', 0)
         self.cpu = train_cfg.get('cpu', False)
-        self.load_model = train_cfg.get('load_model', True)
+        self.load_model = train_cfg.get('load_model', False)
         # "last" = resume from ddpg_checkpoint_last.pth; "best" = load ddpg_actor_best.pth
         self.load_model_tag = str(train_cfg.get('load_model_tag', 'last')).lower()
         if self.load_model_tag in ('latest',):
@@ -127,7 +136,7 @@ class RLConfig:
 
         # Replay Buffer Configuration
         buffer_cfg = config_dict.get('buffer', {})
-        self.load_buffer_bool = buffer_cfg.get('load_buffer_bool', True)
+        self.load_buffer_bool = buffer_cfg.get('load_buffer_bool', False)
         self.load_buffer_filepath = buffer_cfg.get('load_buffer_filepath', 'DDPG_bigbeamline_buffer.pkl')
         self.save_buffer_filepath = buffer_cfg.get('save_buffer_filepath', 'rbBig_beamline_original.pkl')
 
@@ -267,12 +276,15 @@ class RLConfig:
         return agent
 
     def load_buffer(self, agent):
-        """Load replay buffer if it exists"""
+        """Load the requested replay buffer or fail with an actionable error."""
         if os.path.exists(self.load_buffer_filepath):
             agent.buffer.load(self.load_buffer_filepath)
             logger.info(f"Loaded replay buffer from {self.load_buffer_filepath}")
         else:
-            logger.warning(f"Buffer file not found: {self.load_buffer_filepath}")
+            raise FileNotFoundError(
+                f"Requested replay buffer not found: {self.load_buffer_filepath}. "
+                "Set `buffer.load_buffer_bool` to false to train from scratch."
+            )
 
     def save_buffer(self, agent):
         """Save replay buffer"""
@@ -361,7 +373,25 @@ def main():
 
         # Create RLConfig instance
         config = RLConfig(config_dict)
-        
+
+        resolved_setup = validate_runtime_config(
+            config,
+            Path(__file__).resolve().parent,
+        )
+        if args.check_setup:
+            logger.info("RL-ABC setup check passed")
+            for name, path in resolved_setup.items():
+                logger.info("  %s: %s", name, path)
+            for name, installed_version in dependency_versions().items():
+                logger.info("  %s: %s", name, installed_version)
+            return
+
+        if args.mode == "evaluate" and not config.load_model:
+            raise ValueError(
+                "Evaluation mode requires `training.load_model: true` and a "
+                "checkpoint in the seed-specific models directory."
+            )
+
         # Set seed for reproducibility
         set_seed(config.seed)
         logger.info(f"Reproducibility seed set to: {config.seed}")
@@ -412,6 +442,9 @@ def main():
 
             logger.info("Evaluation completed successfully!")
 
+    except (SetupError, FileNotFoundError) as e:
+        logger.error("%s", e)
+        sys.exit(2)
     except Exception as e:
         logger.error(f"Error during execution: {e}", exc_info=True)
         sys.exit(1)
