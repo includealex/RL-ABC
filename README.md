@@ -13,7 +13,7 @@ excluded by `.gitignore`.
 
 ## Tested environment
 
-RL-ABC is tested with **Python 3.10.20**. Use Python 3.10; Python 3.14 is not
+RL-ABC is tested with **Python 3.10.19**. Use Python 3.10; Python 3.14 is not
 supported by this release. The direct dependencies used in testing are pinned
 with exact `==` versions in `requirements.txt`, including:
 
@@ -22,7 +22,7 @@ with exact `==` versions in `requirements.txt`, including:
 - Stable-Baselines3 2.7.1
 - NumPy 2.2.6
 - pandas 2.3.3
-- SciPy 1.15.3
+- SciPy 1.15.2
 - scikit-learn 1.7.2
 - Bayesian Optimization 3.3.0
 - scikit-optimize 0.10.2
@@ -38,6 +38,7 @@ with exact `==` versions in `requirements.txt`, including:
 ├── config.json
 ├── machine.lte
 ├── track.ele
+├── environment.yml
 ├── requirements.txt
 ├── rl_framework/
 │   ├── Environment.py
@@ -59,7 +60,23 @@ git clone --branch clean-code-2026 \
 cd RL-ABC
 ```
 
-Create an isolated Python 3.10 environment:
+The project environment is named `acc-elegant-rl`. Reproduce it with Conda:
+
+```bash
+conda env create -f environment.yml
+conda activate acc-elegant-rl
+python -m pip check
+```
+
+If the environment already exists, activate and update it:
+
+```bash
+conda activate acc-elegant-rl
+python -m pip install -r requirements.txt
+python -m pip check
+```
+
+Alternatively, create an isolated Python 3.10 virtual environment:
 
 ```bash
 python3.10 --version

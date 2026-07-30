@@ -1,0 +1,8 @@
+name: acc-elegant-rl
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10.19
+  - pip=26.0.1
+  - pip:
+      - -r requirements.txt

@@ -1,4 +1,4 @@
-# Exact direct dependencies used to test RL-ABC with Python 3.10.20.
+# Exact direct dependencies used with the acc-elegant-rl Python 3.10.19 environment.
 # Install with: python -m pip install -r requirements.txt
 
 # Core ML/RL
@@ -9,7 +9,7 @@ torch==2.10.0
 # Scientific computing and classical optimizers
 numpy==2.2.6
 pandas==2.3.3
-scipy==1.15.3
+scipy==1.15.2
 scikit-learn==1.7.2
 bayesian-optimization==3.3.0
 scikit-optimize==0.10.2
@@ -18,10 +18,10 @@ scikit-optimize==0.10.2
 matplotlib==3.10.8
 holoviews==1.22.1
 bokeh==3.8.2
-plotly==6.6.0
+plotly==6.5.2
 tensorboard==2.20.0
 
 # Utilities
 pillow==12.1.1
 PyYAML==6.0.3
-ipython==8.38.0
+ipython==8.37.0

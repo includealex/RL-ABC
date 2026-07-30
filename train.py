@@ -59,8 +59,13 @@ logger = logging.getLogger(__name__)
 
 def print_environment_info():
     """Print information about the current Python environment"""
-    conda_env_name = os.environ.get('CONDA_DEFAULT_ENV')
-    conda_env_path = os.environ.get('CONDA_PREFIX')
+    python_prefix = Path(sys.prefix).resolve()
+    if (python_prefix / "conda-meta").is_dir():
+        conda_env_name = python_prefix.name
+        conda_env_path = str(python_prefix)
+    else:
+        conda_env_name = None
+        conda_env_path = None
 
     logger.info("=" * 80)
     logger.info("ENVIRONMENT INFORMATION")
