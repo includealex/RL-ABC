@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from config_manager import load_config
-from rl_framework.Utils import run_episode
+from rl_framework.visulize import ElegantVisualizer, _ordered_values
 from train import RLConfig
 
 
@@ -25,24 +25,20 @@ def _write_html(figure: Any, path: str | Path) -> Path:
     return output
 
 
-def _ordered_values(
-    variable_names: Sequence[str],
-    settings: Mapping[str, float] | Sequence[float] | None,
-) -> list[float]:
-    """Return settings in the chronological order required by the environment."""
-    if settings is None:
-        return [0.0] * len(variable_names)
+def _require_elegant_outputs(env: Any, filenames: Sequence[str]) -> None:
+    """Raise a useful error when Elegant did not create expected SDDS files."""
+    results_path = Path(env.wrapper.results_path)
+    required_files = tuple(results_path / name for name in filenames)
+    missing_files = [path for path in required_files if not path.is_file()]
+    if not missing_files:
+        return
 
-    if isinstance(settings, Mapping):
-        return [float(settings.get(name, 0.0)) for name in variable_names]
-
-    values = [float(value) for value in settings]
-    if len(values) != len(variable_names):
-        raise ValueError(
-            "Expected one value for each controllable parameter: "
-            f"{len(variable_names)} values, received {len(values)}."
-        )
-    return values
+    elegant_error = getattr(env.wrapper, "last_elegant_error", None)
+    details = f" Last Elegant error: {elegant_error}" if elegant_error else ""
+    raise FileNotFoundError(
+        "Elegant did not create the files required for visualization: "
+        f"{', '.join(map(str, missing_files))}.{details}"
+    )
 
 
 def plot_configured_beamline(
@@ -68,38 +64,58 @@ def plot_configured_beamline(
     env, _, file_handler = config.setup_environment()
 
     try:
-        if settings is not None:
-            variable_names = env.wrapper.chroneological_variables
-            values = _ordered_values(variable_names, settings)
-            run_episode(env, source="Values", actions=values)
-
-        results_path = Path(env.wrapper.results_path)
-        required_files = (
-            results_path / "xyz.sdds",
-            results_path / "beamline.mag",
+        visualizer = ElegantVisualizer(
+            env,
+            settings,
+            run_simulation=settings is not None,
         )
-        missing_files = [path for path in required_files if not path.is_file()]
-        if missing_files:
-            elegant_error = getattr(
-                env.wrapper,
-                "last_elegant_error",
-                None,
-            )
-            details = (
-                f" Last Elegant error: {elegant_error}"
-                if elegant_error
-                else ""
-            )
-            raise FileNotFoundError(
-                "Elegant did not create the files required for the beamline "
-                f"layout: {', '.join(map(str, missing_files))}.{details}"
-            )
+        _require_elegant_outputs(env, ("xyz.sdds", "beamline.mag"))
+        return visualizer.plot_mag_3d(
+            output_html=output_html,
+            show=show,
+        )
+    finally:
+        file_handler.close()
 
-        magnet_geometry = env.wrapper.get_mag_3d()
-        figure = env.wrapper.plot_mag_3d(magnet_geometry, show=show)
-        if output_html is not None:
-            _write_html(figure, output_html)
-        return figure
+
+def plot_configured_optics(
+    config_path: str | Path,
+    *,
+    output_dir: str | Path,
+    settings: Mapping[str, float] | Sequence[float] | None = None,
+    show: bool = False,
+) -> dict[str, Any]:
+    """Run one Elegant configuration and save its layout and Twiss envelope."""
+    config = RLConfig(load_config(str(config_path)))
+    env, _, file_handler = config.setup_environment()
+    output = Path(output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+
+    try:
+        visualizer = ElegantVisualizer(
+            env,
+            settings,
+            vis_dir=output / "visualizer",
+            run_simulation=settings is not None,
+        )
+        _require_elegant_outputs(
+            env,
+            (
+                "xyz.sdds",
+                "beamline.mag",
+                "twiss.twi",
+                f"{env.wrapper.input_beam_file}.sig",
+                f"{env.wrapper.input_beam_file}.cen",
+            ),
+        )
+        layout = visualizer.plot_mag_3d(
+            output_html=output / "layout.html",
+            show=show,
+        )
+        twiss, _ = visualizer.plot_twiss(
+            output_html=output / "twiss.html",
+        )
+        return {"layout": layout, "twiss": twiss}
     finally:
         file_handler.close()
 
@@ -113,8 +129,8 @@ def plot_trained_policy(
 ) -> dict[str, Any]:
     """Evaluate a saved DDPG policy and create standard Elegant plots.
 
-    The returned dictionary contains ``betatron``, ``dispersion``, and
-    ``layout`` Plotly figures. Each figure is also written to ``output_dir``.
+    The returned dictionary contains ``betatron``, ``dispersion``, ``layout``,
+    and ``twiss`` figures. Each figure is also written to ``output_dir``.
     """
     config_dict = load_config(str(config_path))
     config_dict.setdefault("training", {})["load_model"] = True
@@ -130,18 +146,25 @@ def plot_trained_policy(
         config.load_agent_weights(agent)
         agent.evaluate(episodes=1)
 
-        wrapper = env.wrapper
+        visualizer = ElegantVisualizer(
+            env,
+            vis_dir=output / "visualizer",
+            run_simulation=False,
+        )
         figures = {
-            "betatron": wrapper.plot_betatron(),
-            "dispersion": wrapper.plot_dispersion(),
+            "betatron": visualizer.plot_betatron(),
+            "dispersion": visualizer.plot_dispersion(),
         }
-        magnet_geometry = wrapper.get_mag_3d()
-        figures["layout"] = wrapper.plot_mag_3d(
-            magnet_geometry,
+        figures["layout"] = visualizer.plot_mag_3d(
+            output_html=output / "layout.html",
             show=show,
         )
+        figures["twiss"], _ = visualizer.plot_twiss(
+            output_html=output / "twiss.html",
+        )
 
-        for name, figure in figures.items():
+        for name in ("betatron", "dispersion"):
+            figure = figures[name]
             _write_html(figure, output / f"{name}.html")
         return figures
     finally:
@@ -161,6 +184,14 @@ def _build_parser() -> argparse.ArgumentParser:
     layout.add_argument("--config", required=True)
     layout.add_argument("--output", required=True)
     layout.add_argument("--show", action="store_true")
+
+    overview = subparsers.add_parser(
+        "overview",
+        help="Run the configured beamline and save its layout and Twiss plots.",
+    )
+    overview.add_argument("--config", required=True)
+    overview.add_argument("--output-dir", required=True)
+    overview.add_argument("--show", action="store_true")
 
     policy = subparsers.add_parser(
         "policy",
@@ -187,6 +218,16 @@ def main() -> None:
             show=args.show,
         )
         print(output.resolve())
+        return
+
+    if args.command == "overview":
+        output_dir = Path(args.output_dir)
+        plot_configured_optics(
+            args.config,
+            output_dir=output_dir,
+            show=args.show,
+        )
+        print(output_dir.resolve())
         return
 
     output_dir = Path(args.output_dir)

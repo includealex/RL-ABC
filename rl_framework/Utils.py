@@ -695,7 +695,10 @@ def run_episode(env, source= "Random", actions= None, memory_episode= None):
         if actions is not None:
             i=0  
             while not done:
-                count= env._check_number_of_variables_to_be_set_at_this_iteration()
+                counts = (
+                    env._check_number_of_variables_to_be_set_at_this_iteration()
+                )
+                count = counts[0] if isinstance(counts, tuple) else counts
                 if count== 3:
                     action_temp= np.array(actions[i :i+count])
                     filler = np.array([0.0])

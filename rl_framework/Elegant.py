@@ -593,7 +593,6 @@ class ElegantWrapper:
             self.dfTrackCen = self._analyzeTrackCen()
 
         dfTwissSdds = self._analyzeTwissSddd()
-        dfTwissSdds.to_csv("people.csv")
 
 
         dim_p = hv.Dimension('p', unit='MeV/c', label="p", range=(0, None))

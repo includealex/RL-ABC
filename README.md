@@ -45,6 +45,7 @@ with exact `==` versions in `requirements.txt`, including:
 ├── rl_framework/
 │   ├── Environment.py
 │   ├── Elegant.py
+│   ├── visulize.py
 │   ├── visualization.py
 │   ├── Utils.py
 │   └── Agents/DDPG.py
@@ -121,8 +122,17 @@ python -m rl_framework.visualization layout \
   --output beamline_layout.html
 ```
 
+Generate the layout and the Twiss beam-envelope/aperture view from one Elegant
+run:
+
+```bash
+python -m rl_framework.visualization overview \
+  --config config.json \
+  --output-dir beamline_overview
+```
+
 After training, evaluate the saved DDPG policy and write betatron, dispersion,
-and layout figures:
+Twiss, and layout figures:
 
 ```bash
 python -m rl_framework.visualization policy \
@@ -136,8 +146,22 @@ The same operations are available as Python functions:
 ```python
 from rl_framework.visualization import (
     plot_configured_beamline,
+    plot_configured_optics,
     plot_trained_policy,
 )
+```
+
+Existing notebooks can also use the historical notebook-facing class:
+
+```python
+from rl_framework.visulize import ElegantVisualizer
+
+visualizer = ElegantVisualizer(env, magnet_settings)
+mag_3d = visualizer.env.wrapper.get_mag_3d()
+visualizer.env.wrapper.plot_mag_3d(mag_3d)
+
+twiss, htmltwiss = visualizer.plot_twiss()
+display(twiss)
 ```
 
 ## 2. Install Elegant and SDDS
