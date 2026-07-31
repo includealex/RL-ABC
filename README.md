@@ -1,5 +1,7 @@
 # RL-ABC: Reinforcement Learning for Accelerator Beamline Control
 
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Anwar9Ibrahim/RL-ABC/blob/clean-code-2026/notebooks/RLABC_GitHub_Colab_quickstart.ipynb)
+
 RL-ABC (RLABC) converts Elegant lattice and command files into a Gymnasium
 environment for reinforcement-learning-based accelerator tuning.
 
@@ -57,9 +59,8 @@ with exact `==` versions in `requirements.txt`, including:
 ## Google Colab quickstart
 
 The repository includes a self-contained Colab demonstration using a short
-four-quadrupole FODO beamline:
-
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Anwar9Ibrahim/RL-ABC/blob/clean-code-2026/notebooks/RLABC_GitHub_Colab_quickstart.ipynb)
+four-quadrupole FODO beamline. Use the **Open in Colab** button at the top of
+this page to launch it directly from the `clean-code-2026` branch.
 
 The notebook installs Elegant and SDDS, creates an isolated Python 3.10
 environment, checks the RL-ABC setup, runs a short DDPG demonstration, and
