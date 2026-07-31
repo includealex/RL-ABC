@@ -54,8 +54,10 @@ def plot_configured_beamline(
 ):
     """Run Elegant and plot the configured beamline floor geometry.
 
-    By default, all controllable parameters are set to zero. A mapping may
-    provide only selected parameters; unspecified parameters remain zero.
+    Environment construction already performs an Elegant reset simulation with
+    all controllable parameters set to zero. A second full episode is run only
+    when explicit ``settings`` are supplied. A mapping may provide only
+    selected parameters; unspecified parameters remain zero.
 
     Returns
     -------
@@ -66,9 +68,32 @@ def plot_configured_beamline(
     env, _, file_handler = config.setup_environment()
 
     try:
-        variable_names = env.wrapper.chroneological_variables
-        values = _ordered_values(variable_names, settings)
-        run_episode(env, source="Values", actions=values)
+        if settings is not None:
+            variable_names = env.wrapper.chroneological_variables
+            values = _ordered_values(variable_names, settings)
+            run_episode(env, source="Values", actions=values)
+
+        results_path = Path(env.wrapper.results_path)
+        required_files = (
+            results_path / "xyz.sdds",
+            results_path / "beamline.mag",
+        )
+        missing_files = [path for path in required_files if not path.is_file()]
+        if missing_files:
+            elegant_error = getattr(
+                env.wrapper,
+                "last_elegant_error",
+                None,
+            )
+            details = (
+                f" Last Elegant error: {elegant_error}"
+                if elegant_error
+                else ""
+            )
+            raise FileNotFoundError(
+                "Elegant did not create the files required for the beamline "
+                f"layout: {', '.join(map(str, missing_files))}.{details}"
+            )
 
         magnet_geometry = env.wrapper.get_mag_3d()
         figure = env.wrapper.plot_mag_3d(magnet_geometry, show=show)
