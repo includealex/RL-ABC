@@ -96,7 +96,9 @@ class VisualizationHelpersTest(unittest.TestCase):
 
             self.assertIsInstance(twiss, hv.Curve)
             self.assertTrue(output.is_file())
-            self.assertIn("<html", html.data.lower())
+            self.assertIn("<iframe", html.data.lower())
+            self.assertIn("srcdoc=", html.data.lower())
+            self.assertIn("&lt;html", html.data.lower())
 
     @patch("rl_framework.visulize.run_episode")
     @patch("rl_framework.visualization.RLConfig")
