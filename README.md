@@ -40,15 +40,30 @@ with exact `==` versions in `requirements.txt`, including:
 ├── track.ele
 ├── environment.yml
 ├── requirements.txt
+├── notebooks/
+│   └── RLABC_GitHub_Colab_quickstart.ipynb
 ├── rl_framework/
 │   ├── Environment.py
 │   ├── Elegant.py
+│   ├── visualization.py
 │   ├── Utils.py
 │   └── Agents/DDPG.py
 └── classical_optimizers/
     ├── scipy_optimization.py
     └── bayesian_optimization.py
 ```
+
+## Google Colab quickstart
+
+The repository includes a self-contained Colab demonstration using a short
+four-quadrupole FODO beamline:
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Anwar9Ibrahim/RL-ABC/blob/clean-code-2026/notebooks/RLABC_GitHub_Colab_quickstart.ipynb)
+
+The notebook installs Elegant and SDDS, creates an isolated Python 3.10
+environment, checks the RL-ABC setup, runs a short DDPG demonstration, and
+generates Elegant-derived interactive visualizations. Its default budget is a
+software check rather than a publication-quality benchmark.
 
 ## 1. Download and install
 
@@ -94,6 +109,36 @@ On Windows, activate with:
 ```
 
 `pip check` should print `No broken requirements found`.
+
+### Reusable visualization commands
+
+After a configured Elegant run, generate an interactive floor layout directly
+from Elegant's `xyz.sdds` and `beamline.mag` output:
+
+```bash
+python -m rl_framework.visualization layout \
+  --config config.json \
+  --output beamline_layout.html
+```
+
+After training, evaluate the saved DDPG policy and write betatron, dispersion,
+and layout figures:
+
+```bash
+python -m rl_framework.visualization policy \
+  --config config.json \
+  --output-dir policy_visualizations \
+  --load-model-tag last
+```
+
+The same operations are available as Python functions:
+
+```python
+from rl_framework.visualization import (
+    plot_configured_beamline,
+    plot_trained_policy,
+)
+```
 
 ## 2. Install Elegant and SDDS
 

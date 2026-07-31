@@ -761,8 +761,18 @@ class ElegantWrapper:
 
         return df_mag
 
-    def plot_mag_3d(self, df_mag):
-        df=df_mag
+    def plot_mag_3d(self, df_mag, show=True):
+        """Plot an Elegant-derived floor plan and return the Plotly figure.
+
+        Parameters
+        ----------
+        df_mag:
+            Data frame returned by :meth:`get_mag_3d`.
+        show:
+            Display the figure immediately. Set to ``False`` when a caller
+            wants to save or embed the returned figure itself.
+        """
+        df = df_mag
         fig = go.Figure()
 
         fig.add_trace(
@@ -776,7 +786,9 @@ class ElegantWrapper:
         fig.update_xaxes(title_text="Z (m)")
         fig.update_yaxes(title_text="X (m)", scaleanchor="x", scaleratio=1)
         fig.update_layout(height=600)
-        fig.show()
+        if show:
+            fig.show()
+        return fig
 
     ''' def process_w(self, input_w, output_w="w.sdds", z0=0):
         output_w=f"{self.results_path}{output_w}"

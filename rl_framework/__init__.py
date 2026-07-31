@@ -6,7 +6,7 @@ Core modules:
 - Agents.DDPG: Deep Deterministic Policy Gradient agent
 - Utils: Utility functions for logging and file handling
 - Elegant: Interface to Elegant simulations
-- visulize: Visualization utilities
+- visualization: Elegant-derived notebook and command-line visualizations
 """
 
 from .Environment import ACCElegantEnvironment
