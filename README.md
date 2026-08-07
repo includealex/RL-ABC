@@ -39,6 +39,7 @@ with exact `==` versions in `requirements.txt`, including:
 ├── runtime_checks.py
 ├── config.json
 ├── machine.lte
+├── machine_2dipole.lte
 ├── track.ele
 ├── environment.yml
 ├── requirements.txt
@@ -207,14 +208,18 @@ python train.py --check-setup \
 
 ## 3. Input files
 
-The input files must be in the **same directory as `train.py`**:
+The input files must be in the **same directory as `train.py`**. The repository
+includes both beamline lattices used in the paper:
 
-- `machine.lte` — Elegant beamline lattice;
-- `track.ele` — Elegant tracking command file.
+- `machine.lte` — four-dipole test-beamline lattice;
+- `machine_2dipole.lte` — two-dipole variant, with BM2 and BM3 replaced by
+  equal-length drifts;
+- `track.ele` — Elegant tracking command file shared by both examples.
 
-Both example inputs are included in the repository. Run commands from the
-repository root (`cd RL-ABC`). To use another beamline, place its `.lte` and
-`.ele` files beside `train.py` and update these `config.json` values:
+Run commands from the repository root (`cd RL-ABC`). To select the two-dipole
+variant, set `simulation.input_beamline_file` to `machine_2dipole.lte`. To use
+another beamline, place its `.lte` and `.ele` files beside `train.py` and update
+these `config.json` values:
 
 ```json
 {
