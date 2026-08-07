@@ -212,8 +212,9 @@ The input files must be in the **same directory as `train.py`**. The repository
 includes both beamline lattices used in the paper:
 
 - `machine.lte` — four-dipole test-beamline lattice;
-- `machine_2dipole.lte` — two-dipole variant, with BM2 and BM3 replaced by
-  equal-length drifts;
+- `machine_2dipole.lte` — exact two-dipole experiment lattice; relative to the
+  test lattice, BM2 and BM3 are equal-length drifts and the bend polarities of
+  BM1 and BM4 are reversed;
 - `track.ele` — Elegant tracking command file shared by both examples.
 
 Run commands from the repository root (`cd RL-ABC`). To select the two-dipole
