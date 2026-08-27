@@ -64,3 +64,11 @@ track_[0-9]*.ele
 *.flo
 *.fin
 *.out
+
+
+*.lte
+*.ele
+content
+quickstart_overview
+quickstart_visuals
+quickstart_fodo.json
