@@ -5,6 +5,7 @@ import torch.nn.functional as F
 import numpy as np
 import random
 from collections import deque
+from datetime import datetime
 from rl_framework.Utils import setLogger, set_seed
 import pickle
 
@@ -175,7 +176,7 @@ class ReplayBuffer:
         with open(filepath, 'wb') as f:
             pickle.dump(self.buffer, f)
     
-    def load(self, filepath):
+    def load(self, filepath, expected_obs_dim=None):
         with open(filepath, 'rb') as f:
             loaded_buffer = pickle.load(f)
 
@@ -187,6 +188,17 @@ class ReplayBuffer:
                 "contain current/next masks. Collect a new replay buffer before "
                 "training the masked agent."
             )
+        if loaded_buffer and expected_obs_dim is not None:
+            state_width = np.asarray(loaded_buffer[0][0]).reshape(-1).size
+            next_state_width = np.asarray(loaded_buffer[0][3]).reshape(-1).size
+            expected_obs_dim = int(expected_obs_dim)
+            if state_width != expected_obs_dim or next_state_width != expected_obs_dim:
+                raise ValueError(
+                    "Replay buffer observation width is incompatible with the "
+                    f"current environment: found {state_width}/{next_state_width}, "
+                    f"expected {expected_obs_dim}. Collect a new buffer or "
+                    "explicitly migrate the old one."
+                )
 
         self.buffer = deque(loaded_buffer, maxlen=self.buffer.maxlen)
             
@@ -233,6 +245,7 @@ class DDPGAgent:
         # Logging and evaluation
         self.steps = 0
         self.episodes = 0
+        self.evaluation_count = 0
         self.num_steps = num_steps
         self.log_interval = log_interval
         self.eval_interval = eval_interval
@@ -255,15 +268,19 @@ class DDPGAgent:
         debug_logger_headers = ('step', 'action', 'noise', 'source')
         self.logger_debug, self.file_handler_debug = setLogger(False, 'ddpg_debug_logger.csv', debug_logger_headers)
 
-        # For evaluation
-        self.plots_dir = f"plots_{self.seed}"
-        self.logs_dir = f"logs_{self.seed}"
+        # For evaluation. Keep each process in a unique directory so files
+        # from separate runs never mix or overwrite one another.
+        started_at = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        self.run_id = f"run_{started_at}_pid{os.getpid()}"
+        self.plots_root = f"plots_{self.seed}"
+        self.logs_root = f"logs_{self.seed}"
+        self.plots_dir = os.path.join(self.plots_root, self.run_id)
+        self.logs_dir = os.path.join(self.logs_root, self.run_id)
         self.models_dir = f"models_{self.seed}"
         os.makedirs(self.plots_dir, exist_ok=True)
         os.makedirs(self.logs_dir, exist_ok=True)
         self.best_eval_particles = -1
         self.best_eval_log = None
-        self.recent_eval_logs = deque(maxlen=10)
 
     '''def choose_action(self, state, greedy=0.5, log_source="train"):
         state = torch.FloatTensor(state).to(device)
@@ -358,7 +375,8 @@ class DDPGAgent:
                     self.writer.add_scalar('Rewards/Reward', reward, self.steps)
                     self.writer.add_scalar('Rewards/NumberOfParticles', info['number_of_particles'], self.steps)
                     break
-            if (ep +1 )% self.eval_interval == 0:
+            self.episodes = ep + 1
+            if self.episodes % self.eval_interval == 0:
                     self.evaluate()
             scores.append(score)
             self.train_rewards.append(score)
@@ -468,16 +486,23 @@ class DDPGAgent:
 
 
     def evaluate(self, episodes=1):
-        eval_log_file = os.path.join(self.logs_dir, f'ddpg_eval_{self.steps}.csv')
-        eval_plot_file = os.path.join(self.plots_dir, f'ddpg_eval_{self.steps}.png')
+        self.evaluation_count += 1
+        eval_name = (
+            f"ddpg_eval_episode_{self.episodes:04d}_"
+            f"step_{self.steps:07d}_eval_{self.evaluation_count:03d}"
+        )
+        eval_log_file = os.path.join(self.logs_dir, f"{eval_name}.csv")
+        eval_plot_file = os.path.join(self.plots_dir, f"{eval_name}.png")
         eval_logger_headers = ('episode', 'rewards', 'number_of_particles', 'output_file', 'episode_reward', 'actions')
         eval_logger, eval_file_handler = setLogger(False, eval_log_file, eval_logger_headers)
 
         self.actor.eval()
+        previous_eval_mode = getattr(self.env, "eval_mode", False)
+        self.env.eval_mode = True
         print("####### DDPG EVALUATING #########")
         best_particles_this_eval = -1
+        total_reward = 0.0
         for i in range(episodes):
-            avg_reward = 0.0
             episode_rewards = []
             episode_reward = 0.0
             done = False
@@ -514,11 +539,10 @@ class DDPGAgent:
 
             final_particles = info.get("number_of_particles", 0)
             best_particles_this_eval = max(best_particles_this_eval, final_particles)
+            total_reward += episode_reward
 
             print("Episode:", i + 1)
             print('rewards:', reward)
-            avg_reward += episode_reward
-
             # Plotting
             plt.figure(figsize=(10, 5))
             plt.plot(range(1, t+1), episode_rewards, 'r-o', label='Sum Episode Reward')
@@ -531,45 +555,25 @@ class DDPGAgent:
             plt.close()
 
         eval_file_handler.close()
+        avg_reward = total_reward / max(int(episodes), 1)
 
-        self.save_models(tag="last")
         #self.buffer.save(f"ddpg_checkpoint_intermediate_{self.seed}.pkl")
         if best_particles_this_eval > self.best_eval_particles:
-            old_best_log = self.best_eval_log
             self.best_eval_particles = best_particles_this_eval
             self.best_eval_log = (eval_log_file, eval_plot_file)
             self.save_models(tag="best")
-            if old_best_log:
-                self._remove_eval_file_if_not_recent(old_best_log[0])
-                self._remove_eval_file_if_not_recent(old_best_log[1])
             print(f'New best model! number_of_particles: {best_particles_this_eval} at step {self.steps}')
-
-        is_best = self.best_eval_log and self.best_eval_log[0] == eval_log_file
-        if not is_best:
-            if len(self.recent_eval_logs) == self.recent_eval_logs.maxlen:
-                evicted_log, evicted_plot = self.recent_eval_logs[0]
-                self._safe_remove(evicted_log)
-                self._safe_remove(evicted_plot)
-            self.recent_eval_logs.append((eval_log_file, eval_plot_file))
+        # Save after updating the best score so the resumable checkpoint and
+        # the best-actor file describe the same evaluation state.
+        self.save_models(tag="last")
 
         print(f'DDPG Evaluation completed at step {self.steps}')
+        print(f'Evaluation log kept at: {eval_log_file}')
         print(f'Average reward: {avg_reward:.2f} over {episodes} episodes')
         print(f'Best number_of_particles so far: {self.best_eval_particles}')
         print("@@@@@@@ DONE DDPG EVALUATING @@@@@@@")
+        self.env.eval_mode = previous_eval_mode
         self.actor.train()
-
-    def _remove_eval_file_if_not_recent(self, filepath):
-        """Remove a file only if it's not in the recent logs deque."""
-        for log, plot in self.recent_eval_logs:
-            if filepath in (log, plot):
-                return
-        self._safe_remove(filepath)
-
-    def _safe_remove(self, filepath):
-        try:
-            os.remove(filepath)
-        except OSError:
-            pass
 
     def save_models(self, tag="last"):
         os.makedirs(self.models_dir, exist_ok=True)
@@ -578,7 +582,11 @@ class DDPGAgent:
         else:
             torch.save({
                 'steps': self.steps,
+                'episodes': self.episodes,
+                'evaluation_count': self.evaluation_count,
+                'run_id': self.run_id,
                 'best_eval_particles': self.best_eval_particles,
+                'input_dims': self.input_dims,
                 'actor': self.actor.state_dict(),
                 'critic': self.critic.state_dict(),
                 'actor_target': self.actor_target.state_dict(),
@@ -588,24 +596,45 @@ class DDPGAgent:
             }, os.path.join(self.models_dir, "ddpg_checkpoint_last.pth"))
         print(f"DDPG Models saved successfully ({tag}) at step {self.steps}.")
 
+    def _validate_checkpoint_observation_dim(self, actor_state, checkpoint_name):
+        """Reject checkpoints built for the former 57/58-value observation."""
+        first_layer = actor_state.get('fc1.weight')
+        if first_layer is None:
+            return
+        saved_input_dims = int(first_layer.shape[1])
+        if saved_input_dims != self.input_dims:
+            raise ValueError(
+                f"{checkpoint_name} uses observation size {saved_input_dims}, "
+                f"but this environment uses {self.input_dims} values "
+                "(beam/aperture features plus angle and tilt). Start a new run "
+                "or explicitly migrate the checkpoint and replay buffer."
+            )
+
     def load_models(self, tag="last"):
         if tag == "best":
             checkpoint_path = os.path.join(self.models_dir, "ddpg_actor_best.pth")
             if not os.path.isfile(checkpoint_path):
                 raise FileNotFoundError(
                     f"Requested checkpoint not found: {checkpoint_path}. "
-                    "Set `training.load_model` to false to train from scratch."
+                    "Set training.load_model to false to train from scratch."
                 )
-            self.actor.load_state_dict(torch.load(checkpoint_path, map_location=self.device))
+            actor_state = torch.load(checkpoint_path, map_location=self.device)
+            self._validate_checkpoint_observation_dim(
+                actor_state, "Best actor checkpoint"
+            )
+            self.actor.load_state_dict(actor_state)
             print("Loaded best actor for evaluation.")
         else:
             checkpoint_path = os.path.join(self.models_dir, "ddpg_checkpoint_last.pth")
             if not os.path.isfile(checkpoint_path):
                 raise FileNotFoundError(
                     f"Requested checkpoint not found: {checkpoint_path}. "
-                    "Set `training.load_model` to false to train from scratch."
+                    "Set training.load_model to false to train from scratch."
                 )
             checkpoint = torch.load(checkpoint_path, map_location=self.device)
+            self._validate_checkpoint_observation_dim(
+                checkpoint['actor'], "DDPG training checkpoint"
+            )
             self.actor.load_state_dict(checkpoint['actor'])
             self.critic.load_state_dict(checkpoint['critic'])
             self.actor_target.load_state_dict(checkpoint['actor_target'])
@@ -613,5 +642,7 @@ class DDPGAgent:
             self.actor_optimizer.load_state_dict(checkpoint['actor_optimizer'])
             self.critic_optimizer.load_state_dict(checkpoint['critic_optimizer'])
             self.steps = checkpoint['steps']
+            self.episodes = checkpoint.get('episodes', 0)
+            self.evaluation_count = checkpoint.get('evaluation_count', 0)
             self.best_eval_particles = checkpoint['best_eval_particles']
             print(f"Resumed training from step {self.steps} (best particles: {self.best_eval_particles}).")

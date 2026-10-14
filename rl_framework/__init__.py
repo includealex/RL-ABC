@@ -1,20 +1,19 @@
-"""
-RL Framework for ACC Elegant Simulations
+"""RL framework for Elegant accelerator simulations.
 
-Core modules:
-- Environment: Gymnasium-based ACC environment
-- Agents.DDPG: Deep Deterministic Policy Gradient agent
-- Utils: Utility functions for logging and file handling
-- Elegant: Interface to Elegant simulations
-- visualization: Elegant-derived notebook and command-line visualizations
+Public classes are loaded lazily so utility-only tooling does not need to
+initialize Gymnasium, Torch, HoloViews, or an accelerator runtime.
 """
 
-from .Environment import ACCElegantEnvironment
-from .Agents.DDPG import DDPGAgent
-from .Utils import setLogger
+from importlib import import_module
 
-__all__ = [
-    'ACCElegantEnvironment',
-    'DDPGAgent',
-    'setLogger',
-]
+__all__ = ["ACCElegantEnvironment", "DDPGAgent", "setLogger"]
+
+
+def __getattr__(name):
+    if name == "ACCElegantEnvironment":
+        return import_module(".Environment", __name__).ACCElegantEnvironment
+    if name == "DDPGAgent":
+        return import_module(".Agents.DDPG", __name__).DDPGAgent
+    if name == "setLogger":
+        return import_module(".Utils", __name__).setLogger
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -30,7 +30,7 @@ require_supported_python()
 import numpy as np
 from scipy.optimize import differential_evolution, OptimizeResult
 
-from rl_framework.Elegant import ElegantWrapper
+from rl_framework.Elegant_edited import ElegantWrapper
 from rl_framework.Utils import create_seeded_tracking_file
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
@@ -254,8 +254,9 @@ def main():
         overrid_dynmaic_commnad=sim_cfg.get("override_dynamic_command", False),
         overrideen_command=sim_cfg.get("overridden_command", "srun -n 2 Pelegant"),
         seed=seed,
+        reset_specific_keys_bool=env_cfg.get("reset_specific_keys_bool", False),
+        reset_keys=env_cfg.get("reset_keys", ["HKICK", "VKICK", "FSE"]),
     )
-    elegant.reset_specific_keys_bool = env_cfg.get("reset_specific_keys_bool", False)
 
     # --- Build bounds from actual wrapper variables ------------------------
     variables = elegant.chroneological_variables

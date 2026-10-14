@@ -191,9 +191,26 @@ Examples:
         help="Initial number of particles for simulation",
     )
     parser.add_argument(
+        "--environment.set_initial_particles",
+        type=lambda x: x.lower() == "true",
+        help="Use and resize &bunched_beam (true) or count &sdds_beam input (false)",
+    )
+    parser.add_argument(
+        "--environment.validate_generated_lattice",
+        type=lambda x: x.lower() == "true",
+        help="Validate the generated lattice with Elegant before training",
+    )
+    parser.add_argument(
         "--environment.reset_specific_keys_bool",
         type=lambda x: x.lower() == "true",
-        help="Reset Hkick, Vkick, and FSE (true/false)",
+        help="Enable zeroing of the controls listed in environment.reset_keys",
+    )
+    parser.add_argument(
+        "--environment.reset_keys",
+        nargs="+",
+        type=lambda x: x.upper(),
+        choices=["K1", "HKICK", "VKICK", "FSE"],
+        help="Controls to hold at zero when reset_specific_keys_bool is true",
     )
 
     # Training Arguments

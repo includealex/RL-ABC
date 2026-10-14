@@ -1,8 +1,8 @@
 {
   "platform": {
-    "os_type": "linux",
-    "elegant_path": "/path/to/elegant/bin/",
-    "sdds_path": "/path/to/elegant/defns.rpn"
+    "os_type": "darwin",
+    "elegant_path": "/Users/anwar/Downloads/sdds/darwin-x86/",
+    "sdds_path": "/Users/anwar/Downloads/sdds/defns.rpn"
   },
   "simulation": {
     "override_dynamic_command": false,
@@ -17,14 +17,17 @@
     "stage": null,
     "n_bins": 5,
     "reset_specific_keys_bool": false,
-    "init_num_particles": 1000
+    "reset_keys": ["HKICK", "VKICK", "FSE"],
+    "init_num_particles": 1000,
+    "set_initial_particles": true,
+    "validate_generated_lattice": true
   },
   "training": {
     "seed": 0,
     "cpu": false,
     "load_model": false,
     "load_model_tag": "last",
-    "n_episodes": 10000,
+    "n_episodes": 10,
     "max_steps": null,
     "greedy": 0.5
   },

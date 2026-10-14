@@ -1,6 +1,35 @@
+"""Canonical Elegant preprocessing and RL observation utilities.
+
+This module keeps the established public helper API while using the hardened
+lattice preprocessing, graph-building, observation, and validation functions.
+
+Design rules
+------------
+* Comments are never parsed as active Elegant statements and are copied intact.
+* ``&`` continuation lines are joined for parsing.
+* ``LINE`` expressions are parsed structurally, including ``N*item`` and
+  reversed ``-item`` references.
+* The selected beamline is flattened to base-element occurrences.
+* Every repeated controllable element gets an occurrence-specific definition
+  (``NAME_1``, ``NAME_2``, ...); passive elements keep their original names.
+* A generated WATCH is placed immediately before every active element that has
+  at least one existing controllable parameter: K1, HKICK, VKICK, or FSE.
+* Only those existing controllable values are changed.  The reset lattice gets
+  zeroes, while the returned template gets agent-value placeholders.  All other
+  parameters, including TILT, are preserved verbatim.
+"""
+
+from __future__ import annotations
+
+# ---------------------------------------------------------------------------
+# Compatibility helpers appear first; hardened lattice functions later in this
+# file are the canonical definitions exported by Python.
+# ---------------------------------------------------------------------------
+
 import re
 import os
 import shutil
+import subprocess
 from collections import deque
 import torch
 import numpy as np
@@ -477,7 +506,7 @@ def create_graph(expanded_beamline):
     """
     Creates a graph-like structure from the expanded beamline.
     """
-    """graph = []
+    r"""graph = []
     for element, definition in expanded_beamline:
         element_type = definition.split(',')[0] if definition else 'UNKNOWN'
         attributes = {}
@@ -635,9 +664,11 @@ def setLogger(load, log_file= 'environment_log.csv', headers= ('reward', 'action
     file_handler.flush()
     return logger, file_handler
 
-def reset_specific_keys(input_dict):
+def reset_specific_keys(input_dict, reset_keys=None):
     """
-    Sets the values of keys containing 'HKICK', 'VKICK', or 'FSE' to zero.
+    Set configured control-variable suffixes to zero.
+
+    ``reset_keys=None`` preserves the historical HKICK/VKICK/FSE default.
 
     Args:
         input_dict (dict): The input dictionary.
@@ -645,9 +676,11 @@ def reset_specific_keys(input_dict):
     Returns:
         dict: The updated dictionary with specific keys reset to zero.
     """
+    from .Utils_magnet_actions import normalize_reset_keys
+
+    normalized = normalize_reset_keys(reset_keys)
     for key in input_dict.keys():
-        if any(substring in key for substring in ["HKICK", "VKICK", "FSE"]):
-        #if any(substring in key for substring in ["HKICK", "VKICK"]):
+        if any(str(key).upper().endswith(parameter) for parameter in normalized):
             input_dict[key] = 0
     return input_dict
 
@@ -668,6 +701,143 @@ def change_num_initial_particles(path="", num=10000):
     with open(path, "w") as f:
         f.writelines(lines)
     return k, num
+
+
+def _active_elegant_text(path):
+    """Return an Elegant command file with ``!`` comments removed."""
+    with open(path, "r") as stream:
+        return "\n".join(line.split("!", 1)[0] for line in stream)
+
+
+def _namelist_blocks(content, name):
+    return re.findall(
+        rf"&{re.escape(name)}\b(.*?)&end\b",
+        content,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+
+def _namelist_string(block, parameter):
+    match = re.search(
+        rf"\b{re.escape(parameter)}\s*=\s*(?:\"([^\"]+)\"|'([^']+)'|([^,\s]+))",
+        block,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+    return next(value for value in match.groups() if value is not None)
+
+
+def count_sdds_particles(path, sdds2stream_path=None):
+    """Count particles in an Elegant SDDS beam using its mandatory x column."""
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"SDDS input beam file not found: {path}")
+
+    executable = sdds2stream_path
+    if not executable or not os.path.isfile(executable):
+        executable = shutil.which("sdds2stream")
+    if not executable:
+        raise FileNotFoundError(
+            "Cannot count the SDDS beam: sdds2stream was not found. "
+            "Set platform.elegant_path to the SDDS executable directory."
+        )
+
+    try:
+        result = subprocess.run(
+            [executable, path, "-columns=x"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or "unknown SDDS error").strip()
+        raise RuntimeError(f"Could not read SDDS input beam {path}: {detail}") from exc
+
+    count = sum(1 for line in result.stdout.splitlines() if line.strip())
+    if count <= 0:
+        raise ValueError(f"SDDS input beam contains no particles: {path}")
+    return count
+
+
+def configure_initial_particles(
+    ele_path,
+    set_initial_particles,
+    configured_count=None,
+    sdds2stream_path=None,
+):
+    """Validate the beam mode and return its authoritative particle count.
+
+    ``set_initial_particles=True`` is the generated-beam mode.  It requires one
+    ``&bunched_beam`` namelist and updates ``n_particles_per_bunch``.
+
+    ``set_initial_particles=False`` is the external-beam mode.  It requires one
+    ``&sdds_beam`` namelist and counts the particles in that namelist's input
+    file.  ``configured_count`` is deliberately ignored in this mode.
+    """
+    if not isinstance(set_initial_particles, bool):
+        raise TypeError("environment.set_initial_particles must be true or false")
+
+    content = _active_elegant_text(ele_path)
+    generated_blocks = _namelist_blocks(content, "bunched_beam")
+    external_blocks = _namelist_blocks(content, "sdds_beam")
+
+    if generated_blocks and external_blocks:
+        raise ValueError(
+            f"{ele_path} contains both &bunched_beam and &sdds_beam; "
+            "select exactly one beam source"
+        )
+
+    if set_initial_particles:
+        if external_blocks:
+            raise ValueError(
+                "environment.set_initial_particles=true cannot be used with "
+                f"an &sdds_beam input ({ele_path}). Set it to false."
+            )
+        if len(generated_blocks) != 1:
+            raise ValueError(
+                "environment.set_initial_particles=true requires exactly one "
+                f"&bunched_beam namelist in {ele_path}"
+            )
+        if isinstance(configured_count, bool) or not isinstance(configured_count, int):
+            raise TypeError(
+                "environment.init_num_particles must be a positive integer "
+                "when set_initial_particles=true"
+            )
+        if configured_count <= 0:
+            raise ValueError(
+                "environment.init_num_particles must be greater than zero "
+                "when set_initial_particles=true"
+            )
+        old_count, actual_count = change_num_initial_particles(
+            ele_path, configured_count
+        )
+        if old_count is None:
+            raise ValueError(
+                f"The &bunched_beam namelist in {ele_path} has no "
+                "n_particles_per_bunch parameter"
+            )
+        return actual_count, "generated bunched_beam", None
+
+    if generated_blocks:
+        raise ValueError(
+            "environment.set_initial_particles=false cannot be used with "
+            f"a generated &bunched_beam ({ele_path}). Set it to true."
+        )
+    if len(external_blocks) != 1:
+        raise ValueError(
+            "environment.set_initial_particles=false requires exactly one "
+            f"&sdds_beam namelist in {ele_path}"
+        )
+
+    beam_name = _namelist_string(external_blocks[0], "input")
+    if not beam_name:
+        raise ValueError(f"The &sdds_beam namelist in {ele_path} has no input file")
+    beam_path = beam_name
+    if not os.path.isabs(beam_path):
+        beam_path = os.path.join(os.path.dirname(os.path.abspath(ele_path)), beam_path)
+    beam_path = os.path.normpath(beam_path)
+    actual_count = count_sdds_particles(beam_path, sdds2stream_path)
+    return actual_count, "external sdds_beam", beam_path
 
 #expected sources ["Random", "Memory", "Values"]
 def run_episode(env, source= "Random", actions= None, memory_episode= None):
@@ -695,18 +865,26 @@ def run_episode(env, source= "Random", actions= None, memory_episode= None):
         if actions is not None:
             i=0  
             while not done:
-                counts = (
-                    env._check_number_of_variables_to_be_set_at_this_iteration()
-                )
+                counts = env._check_number_of_variables_to_be_set_at_this_iteration()
                 count = counts[0] if isinstance(counts, tuple) else counts
-                if count== 3:
-                    action_temp= np.array(actions[i :i+count])
-                    filler = np.array([0.0])
-                    action = np.concatenate((action_temp, filler), axis=0)
+                channel_index = {"K1": 0, "HKICK": 1, "VKICK": 2, "FSE": 3}
+                action = np.zeros(4, dtype=np.float32)
+                variables = env._variables_for_iteration(0)
+                if isinstance(variables, (list, tuple)):
+                    if len(variables) != count:
+                        raise RuntimeError(
+                            f"Expected {count} variables for the current magnet, "
+                            f"found {len(variables)}"
+                        )
+                    for value, variable in zip(actions[i : i + count], variables):
+                        _, parameter = env._split_variable_name(variable)
+                        if parameter not in channel_index:
+                            raise RuntimeError(f"Unknown controllable variable: {variable}")
+                        action[channel_index[parameter]] = value
+                elif count == 1:
+                    action[3] = actions[i]
                 else:
-                    action_temp= np.array(actions[i :i+count])
-                    filler = np.array([0.0, 0.0, 0.0])
-                    action = np.concatenate((filler, action_temp), axis=0)
+                    action[:count] = actions[i : i + count]
                 i= i+ count
                 next_state, reward, done, _, info = env.step(action)
                 print(info['output_file'] ,info['number_of_particles'],reward, done, env.get_number_of_particles())
@@ -893,7 +1071,82 @@ def create_nn_representation(df, a, b, n_bins=5):
 
     return np.concatenate([stats, hist, [point_count, fraction_inside], cov_elements, ellipse_params])
 
-def create_nn_representation_new(df, a_prev, b_prev, a_next, b_next, n_bins=5, initialNumParticles= 0):
+LATTICE_CONTEXT_FEATURES = ("angle", "tilt")
+
+
+def nn_observation_size(n_bins=5):
+    """Return the fixed observation width for a configured x-y histogram."""
+    return 16 + int(n_bins) ** 2 + 1 + 1 + 10 + 4 + len(
+        LATTICE_CONTEXT_FEATURES
+    )
+
+
+def lattice_context_for_watch_point(watch_point, graph):
+    """Return ``(angle, tilt)`` for the magnet following ``watch_point``.
+
+    Automatically generated WATCH elements are placed immediately before the
+    controllable magnet they describe.  MAXAMP and other zero-length metadata
+    are skipped for robustness, but the search stops at the next WATCH.
+
+    ANGLE is zero for a quadrupole.  For a dipole, its sign is preserved from
+    the lattice and inverted for a reversed occurrence.  TILT is returned in
+    radians exactly as specified by the lattice, defaulting to zero.
+    """
+    # Import locally to keep the lattice parser independent from the action
+    # registry while sharing its complete Elegant magnet-family vocabulary.
+    from .Utils_magnet_actions import magnet_family, normalize_element_type
+
+    found_watch = False
+    for node in graph:
+        node_type = normalize_element_type(node.get("type", ""))
+        if not found_watch:
+            if node_type == "WATCH" and node.get("name") == watch_point:
+                found_watch = True
+            continue
+
+        if node_type == "WATCH":
+            break
+        family = magnet_family(node_type)
+        if family is None:
+            continue
+
+        attributes = node.get("attributes") or {}
+        try:
+            tilt = float(attributes.get("TILT", 0.0))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Invalid TILT for {node.get('name', '<unnamed>')}: "
+                f"{attributes.get('TILT')!r}"
+            ) from exc
+
+        if family == "quadrupole":
+            return 0.0, tilt
+
+        try:
+            angle = float(attributes.get("ANGLE", 0.0))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Invalid ANGLE for {node.get('name', '<unnamed>')}: "
+                f"{attributes.get('ANGLE')!r}"
+            ) from exc
+        if node.get("reverse", False):
+            angle = -angle
+        return angle, tilt
+
+    return 0.0, 0.0
+
+
+def create_nn_representation_new(
+    df,
+    a_prev,
+    b_prev,
+    a_next,
+    b_next,
+    n_bins=5,
+    initialNumParticles=0,
+    angle=0.0,
+    tilt=0.0,
+):
     """
     Create a fixed-size feature vector for neural network input from particle data.
     Combines robust statistical summaries, 2D histogram of (x, y), point count,
@@ -914,11 +1167,14 @@ def create_nn_representation_new(df, a_prev, b_prev, a_next, b_next, n_bins=5, i
         - Fraction of points inside ellipse (1)
         - Covariance matrix upper triangle for x, y, xp, yp (10 elements)
         - Ellipse parameters a_previous, b_previous and a_next, b_next (4)
-        Total size: 16 + 25 + 1 + 1 + 10 + 2 = 57
+        - Upcoming magnet signed bend angle and tilt in radians (2)
+        Total size for n_bins=5: 16 + 25 + 1 + 1 + 10 + 4 + 2 = 59
     """
-    output_size = 16 + n_bins**2 + 1 + 1 + 10 + 4
+    output_size = nn_observation_size(n_bins)
     if df.empty:
-        return np.zeros(output_size)
+        observation = np.zeros(output_size)
+        observation[-2:] = [angle, tilt]
+        return observation
 
     features = ['x', 'y', 'xp', 'yp']
     data = df[features].to_numpy()
@@ -944,7 +1200,9 @@ def create_nn_representation_new(df, a_prev, b_prev, a_next, b_next, n_bins=5, i
     else:
         hist = np.zeros(n_bins**2)
 
-    point_count =len(df)/initialNumParticles
+    if initialNumParticles <= 0:
+        raise ValueError("initialNumParticles must be positive for a non-empty beam")
+    point_count = len(df) / initialNumParticles
     fraction_inside = points_in_region(df, a_prev, b_prev) / 100 if not df.empty else 0.0
 
     if len(df) < 3:
@@ -957,9 +1215,19 @@ def create_nn_representation_new(df, a_prev, b_prev, a_next, b_next, n_bins=5, i
     cov_indices = np.triu_indices(4)
     cov_elements = cov_matrix[cov_indices]
 
-    ellipse_params = np.array([ a_prev, b_prev, a_next, b_next])
+    ellipse_params = np.array([a_prev, b_prev, a_next, b_next])
+    lattice_context = np.array([angle, tilt], dtype=float)
 
-    return np.concatenate([stats, hist, [point_count, fraction_inside], cov_elements, ellipse_params])
+    return np.concatenate(
+        [
+            stats,
+            hist,
+            [point_count, fraction_inside],
+            cov_elements,
+            ellipse_params,
+            lattice_context,
+        ]
+    )
 
 
 def points_in_region(df, a, b):
@@ -1020,8 +1288,21 @@ def process_particle_data(file_path, watch_point, graph, watch_points, n_bins=5,
         if not all(col in df.columns for col in required_columns):
             raise ValueError("CSV file must contain columns: x, y, xp, yp")
 
-        # Create neural network representation
-        nn_representation = create_nn_representation_new(df, a_prev, b_prev, a_next, b_next, n_bins, initialNumParticles=initialNumParticles) #edit here 
+        angle, tilt = lattice_context_for_watch_point(watch_point, graph)
+
+        # Create neural network representation.  The last two values describe
+        # the upcoming controllable magnet in lattice coordinates.
+        nn_representation = create_nn_representation_new(
+            df,
+            a_prev,
+            b_prev,
+            a_next,
+            b_next,
+            n_bins,
+            initialNumParticles=initialNumParticles,
+            angle=angle,
+            tilt=tilt,
+        )
 
         # Calculate percentage of points in elliptical region
         percentage_in_region = points_in_region(df, a_prev, b_prev)
@@ -1032,9 +1313,973 @@ def process_particle_data(file_path, watch_point, graph, watch_points, n_bins=5,
             'a_prev': a_prev,
             'b_prev': b_prev,
             'a_next': a_next,
-            'b_next': b_next
+            'b_next': b_next,
+            'angle': angle,
+            'tilt': tilt,
         }
 
     except Exception as e:
         print(f"Error processing file {file_path}: {str(e)}")
         return None
+
+# ---------------------------------------------------------------------------
+# Safer lattice preprocessing, graph, and validation overrides.
+# Definitions below replace only the corresponding lattice-related functions.
+# ---------------------------------------------------------------------------
+
+import re
+import shutil
+import subprocess
+import tempfile
+from collections import Counter
+from dataclasses import dataclass, replace
+from pathlib import Path
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+
+import numpy as np
+from sklearn.preprocessing import MinMaxScaler, OneHotEncoder
+
+
+CONTROL_PARAMETERS: Tuple[str, ...] = ("K1", "HKICK", "VKICK", "FSE")
+
+# Elegant accepts a number of short aliases.  Graph consumers should see one
+# stable spelling while the lattice text itself remains unchanged.
+ELEMENT_TYPE_ALIASES: Dict[str, str] = {
+    "DRIF": "DRIFT",
+    "EDRIFT": "DRIFT",
+    "CSRDRIFT": "DRIFT",
+    "SBEN": "SBEND",
+    "RBEN": "SBEND",
+    "CSBEND": "SBEND",
+    "KQUAD": "QUAD",
+    "RFCA": "RFCA",
+    "MONITOR": "MONI",
+}
+
+
+class LatticeParseError(ValueError):
+    """Raised when an Elegant lattice cannot be expanded unambiguously."""
+
+
+class LatticeValidationError(RuntimeError):
+    """Raised when structural or Elegant validation fails."""
+
+
+@dataclass(frozen=True)
+class _Statement:
+    raw: str
+    code: str
+    name: Optional[str] = None
+    rhs: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class _Definition:
+    name: str
+    rhs: str
+    element_type: str
+
+
+@dataclass(frozen=True)
+class _LineItem:
+    name: str
+    repeat: int = 1
+    reverse: bool = False
+    raw: str = ""
+
+
+@dataclass(frozen=True)
+class _Occurrence:
+    name: str
+    definition: _Definition
+    reverse: bool = False
+
+
+_NAME_PATTERN = r"[A-Za-z_][A-Za-z0-9_.$]*"
+_DEFINITION_RE = re.compile(
+    rf"^\s*({_NAME_PATTERN})\s*:\s*(.*?)\s*$", re.DOTALL
+)
+_LINE_RE = re.compile(r"^\s*LINE\s*=\s*\((.*)\)\s*$", re.IGNORECASE | re.DOTALL)
+_CONTROL_ASSIGNMENT_RE = re.compile(
+    r"\b(K1|HKICK|VKICK|FSE)(\s*=\s*)"
+    r"(\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'|[^,\s&!]+)",
+    re.IGNORECASE,
+)
+
+
+def _split_code_comment(line: str) -> Tuple[str, str]:
+    """Split an Elegant physical line at the first unquoted ``!``."""
+    quote: Optional[str] = None
+    escaped = False
+    for index, char in enumerate(line):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\" and quote:
+            escaped = True
+            continue
+        if char in ("'", '"'):
+            if quote == char:
+                quote = None
+            elif quote is None:
+                quote = char
+            continue
+        if char == "!" and quote is None:
+            return line[:index], line[index:]
+    return line, ""
+
+
+def _iter_statements(content: str) -> Iterable[_Statement]:
+    """Yield logical Elegant statements while retaining their original text."""
+    lines = content.splitlines(keepends=True)
+    index = 0
+    while index < len(lines):
+        first_raw = lines[index]
+        first_body = first_raw.rstrip("\r\n")
+        first_code, _ = _split_code_comment(first_body)
+
+        if not first_code.strip():
+            yield _Statement(raw=first_raw, code="")
+            index += 1
+            continue
+
+        raw_parts: List[str] = []
+        code_parts: List[str] = []
+        while index < len(lines):
+            raw = lines[index]
+            body = raw.rstrip("\r\n")
+            code, _ = _split_code_comment(body)
+            stripped = code.rstrip()
+            continued = stripped.endswith("&")
+            if continued:
+                stripped = stripped[:-1]
+            raw_parts.append(raw)
+            code_parts.append(stripped.strip())
+            index += 1
+            if not continued:
+                break
+
+        raw_text = "".join(raw_parts)
+        logical_code = " ".join(part for part in code_parts if part).strip()
+        match = _DEFINITION_RE.match(logical_code)
+        if match:
+            yield _Statement(
+                raw=raw_text,
+                code=logical_code,
+                name=match.group(1),
+                rhs=match.group(2),
+            )
+        else:
+            yield _Statement(raw=raw_text, code=logical_code)
+
+
+def _split_top_level(value: str, delimiter: str = ",") -> List[str]:
+    """Split outside quotes and nested parentheses/brackets/braces."""
+    parts: List[str] = []
+    start = 0
+    quote: Optional[str] = None
+    escaped = False
+    depth = 0
+    pairs = {"(": ")", "[": "]", "{": "}"}
+    closing = set(pairs.values())
+
+    for index, char in enumerate(value):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\" and quote:
+            escaped = True
+            continue
+        if char in ("'", '"'):
+            if quote == char:
+                quote = None
+            elif quote is None:
+                quote = char
+            continue
+        if quote:
+            continue
+        if char in pairs:
+            depth += 1
+        elif char in closing:
+            depth -= 1
+            if depth < 0:
+                raise LatticeParseError(f"Unbalanced delimiter in: {value}")
+        elif char == delimiter and depth == 0:
+            parts.append(value[start:index].strip())
+            start = index + 1
+
+    if quote or depth != 0:
+        raise LatticeParseError(f"Unbalanced quotes or delimiters in: {value}")
+    parts.append(value[start:].strip())
+    return [part for part in parts if part]
+
+
+def _normalize_element_type(element_type: str) -> str:
+    value = element_type.strip().upper()
+    return ELEMENT_TYPE_ALIASES.get(value, value)
+
+
+def _definition_type_and_parameters(rhs: str) -> Tuple[str, Dict[str, str]]:
+    if _LINE_RE.match(rhs):
+        return "LINE", {}
+    parts = _split_top_level(rhs)
+    if not parts:
+        return "UNKNOWN", {}
+    element_type = _normalize_element_type(parts[0].split()[0])
+    parameters: Dict[str, str] = {}
+    for part in parts[1:]:
+        if "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        parameters[key.strip().upper()] = value.strip()
+    return element_type, parameters
+
+
+def _definition_table(
+    content: str, *, reject_duplicates: bool = True
+) -> Tuple[List[_Statement], Dict[str, _Definition]]:
+    statements = list(_iter_statements(content))
+    definitions: Dict[str, _Definition] = {}
+    for statement in statements:
+        if not statement.name or statement.rhs is None:
+            continue
+        element_type, _ = _definition_type_and_parameters(statement.rhs)
+        key = statement.name.casefold()
+        if reject_duplicates and key in definitions:
+            raise LatticeParseError(
+                f"Multiple active definitions of element {statement.name}"
+            )
+        definitions[key] = _Definition(
+            name=statement.name,
+            rhs=statement.rhs,
+            element_type=element_type,
+        )
+    return statements, definitions
+
+
+def _parse_line_items(rhs: str) -> List[_LineItem]:
+    match = _LINE_RE.match(rhs)
+    if not match:
+        raise LatticeParseError(f"Not a LINE definition: {rhs}")
+
+    items: List[_LineItem] = []
+    for raw_item in _split_top_level(match.group(1)):
+        token = raw_item.strip()
+        repeat = 1
+        repeat_match = re.match(r"^(\d+)\s*\*\s*(.+)$", token)
+        if repeat_match:
+            repeat = int(repeat_match.group(1))
+            token = repeat_match.group(2).strip()
+        if repeat < 1:
+            raise LatticeParseError(f"Invalid repetition count in {raw_item}")
+
+        reverse = False
+        if token.startswith(("-", "+")):
+            reverse = token[0] == "-"
+            token = token[1:].strip()
+        if not re.fullmatch(_NAME_PATTERN, token):
+            raise LatticeParseError(
+                f"Unsupported LINE item {raw_item!r}; expected [N*][-]NAME"
+            )
+        items.append(_LineItem(token, repeat, reverse, raw_item))
+    return items
+
+
+def _reverse_occurrences(occurrences: Sequence[_Occurrence]) -> List[_Occurrence]:
+    return [
+        replace(occurrence, reverse=not occurrence.reverse)
+        for occurrence in reversed(occurrences)
+    ]
+
+
+def _expand_from_definitions(
+    definitions: Mapping[str, _Definition], beamline_name: str
+) -> List[_Occurrence]:
+    def expand(name: str, stack: Tuple[str, ...]) -> List[_Occurrence]:
+        key = name.casefold()
+        if key not in definitions:
+            path = " -> ".join(stack + (name,))
+            raise LatticeParseError(f"Undefined lattice item {name!r} in {path}")
+        if key in stack:
+            path = " -> ".join(stack + (key,))
+            raise LatticeParseError(f"Recursive LINE definition detected: {path}")
+
+        definition = definitions[key]
+        if definition.element_type != "LINE":
+            return [_Occurrence(definition.name, definition)]
+
+        expanded: List[_Occurrence] = []
+        for item in _parse_line_items(definition.rhs):
+            item_occurrences = expand(item.name, stack + (key,))
+            if item.reverse:
+                item_occurrences = _reverse_occurrences(item_occurrences)
+            for _ in range(item.repeat):
+                expanded.extend(item_occurrences)
+        return expanded
+
+    return expand(beamline_name, ())
+
+
+def _inline_comments(raw: str) -> List[str]:
+    comments: List[str] = []
+    for line in raw.splitlines():
+        _, comment = _split_code_comment(line)
+        if comment:
+            comments.append(comment)
+    return comments
+
+
+def _render_line_statement(name: str, tokens: Sequence[str], old_raw: str) -> str:
+    comments = _inline_comments(old_raw)
+    suffix = ""
+    if comments:
+        suffix = "  " + "  ".join(comments)
+    newline = "\n" if old_raw.endswith(("\n", "\r")) else ""
+    return f"{name}: LINE=({', '.join(tokens)}){suffix}{newline}"
+
+
+def _replace_statement(
+    statements: Sequence[_Statement], target_name: str, replacement: str,
+    *, prefix: str = ""
+) -> str:
+    output: List[str] = []
+    replaced = False
+    for statement in statements:
+        if statement.name and statement.name.casefold() == target_name.casefold():
+            if replaced:
+                raise LatticeParseError(f"Multiple definitions of {target_name}")
+            output.append(prefix)
+            output.append(replacement)
+            replaced = True
+        else:
+            output.append(statement.raw)
+    if not replaced:
+        raise LatticeParseError(f"Beamline {target_name!r} was not found")
+    return "".join(output)
+
+
+def _control_keys(definition: _Definition) -> Tuple[str, ...]:
+    _, parameters = _definition_type_and_parameters(definition.rhs)
+    return tuple(key for key in CONTROL_PARAMETERS if key in parameters)
+
+
+def _is_controllable(definition: _Definition) -> bool:
+    return bool(_control_keys(definition))
+
+
+def remove_watch_points(file_path, backup_path="unchanged_input.lte"):
+    """Remove active WATCH definitions/references without touching comments.
+
+    The caller in ``Elegant.py`` invokes this on a seed-specific working copy,
+    so the shared source lattice is not modified.  ``backup_path`` receives an
+    exact byte-for-byte copy of the working input before modification.
+    """
+    source = Path(file_path)
+    content = source.read_text()
+    Path(backup_path).write_text(content)
+
+    statements, definitions = _definition_table(content)
+    watch_names = {
+        definition.name.casefold()
+        for definition in definitions.values()
+        if definition.element_type == "WATCH"
+    }
+    if not watch_names:
+        return
+
+    output: List[str] = []
+    for statement in statements:
+        if statement.name and statement.name.casefold() in watch_names:
+            continue
+        if statement.name and statement.rhs and _LINE_RE.match(statement.rhs):
+            items = _parse_line_items(statement.rhs)
+            filtered = [item for item in items if item.name.casefold() not in watch_names]
+            if len(filtered) != len(items):
+                tokens = [item.raw.strip() for item in filtered]
+                output.append(_render_line_statement(statement.name, tokens, statement.raw))
+                continue
+        output.append(statement.raw)
+    source.write_text("".join(output))
+
+
+def parse_lattice_file(file_path):
+    """Return every active element definition; never activate comments."""
+    content = Path(file_path).read_text()
+    _, definitions = _definition_table(content)
+    elements: Dict[str, Dict[str, object]] = {}
+    category = {
+        "WATCH": "watch point",
+        "QUAD": "quadrupole magnet",
+        "SBEND": "dipole magnet",
+        "DRIFT": "drift",
+        "MAXAMP": "aperture",
+    }
+    for definition in definitions.values():
+        element_type, parameters = _definition_type_and_parameters(definition.rhs)
+        elements[definition.name] = {
+            "type": category.get(element_type, element_type.lower()),
+            "element_type": element_type,
+            "parameters": parameters,
+            "raw_definition": definition.rhs,
+        }
+    return elements
+
+
+def _qualify_reused_direct_controllables(content: str) -> Tuple[str, set[str]]:
+    """Qualify repeated controllable references across active LINE definitions.
+
+    This pass considers only elements that already expose K1, HKICK, VKICK, or
+    FSE.  Passive elements are never cloned.  Counting every uncommented LINE
+    definition means, for example, that Q1L0 in PInject and Q1L0 in PBInject
+    become Q1L0_1 and Q1L0_2 respectively.  Later, the selected beamline is
+    expanded and WATCH elements are added only to the occurrences it reaches.
+    """
+    statements, definitions = _definition_table(content)
+    direct_counts: Counter[str] = Counter()
+
+    for statement in statements:
+        if not statement.name or not statement.rhs or not _LINE_RE.match(statement.rhs):
+            continue
+        for item in _parse_line_items(statement.rhs):
+            definition = definitions.get(item.name.casefold())
+            if definition is not None and _is_controllable(definition):
+                direct_counts[item.name.casefold()] += item.repeat
+
+    repeated_names = {
+        name for name, count in direct_counts.items() if count > 1
+    }
+    if not repeated_names:
+        return content, set()
+
+    existing_names = set(definitions)
+    indices: Counter[str] = Counter()
+    generated_names: set[str] = set()
+    generated_definitions: List[str] = []
+    output: List[str] = []
+    first_line_output_index: Optional[int] = None
+
+    for statement in statements:
+        if not statement.name or not statement.rhs or not _LINE_RE.match(statement.rhs):
+            output.append(statement.raw)
+            continue
+
+        if first_line_output_index is None:
+            first_line_output_index = len(output)
+
+        rewritten_tokens: List[str] = []
+        changed = False
+        for item in _parse_line_items(statement.rhs):
+            key = item.name.casefold()
+            definition = definitions.get(key)
+            if (
+                key not in repeated_names
+                or definition is None
+                or not _is_controllable(definition)
+            ):
+                rewritten_tokens.append(item.raw.strip())
+                continue
+
+            changed = True
+            for _ in range(item.repeat):
+                indices[key] += 1
+                occurrence_name = f"{definition.name}_{indices[key]}"
+                occurrence_key = occurrence_name.casefold()
+                if occurrence_key in existing_names:
+                    raise LatticeParseError(
+                        f"Cannot create occurrence name {occurrence_name}: it already exists"
+                    )
+                existing_names.add(occurrence_key)
+                generated_names.add(occurrence_key)
+                generated_definitions.append(
+                    f"{occurrence_name}: {definition.rhs}\n"
+                )
+                prefix = "-" if item.reverse else ""
+                rewritten_tokens.append(f"{prefix}{occurrence_name}")
+
+        if changed:
+            output.append(
+                _render_line_statement(
+                    statement.name, rewritten_tokens, statement.raw
+                )
+            )
+        else:
+            output.append(statement.raw)
+
+    generated_block = (
+        "! --- generated controllable occurrence definitions: begin ---\n"
+        + "".join(generated_definitions)
+        + "! --- generated controllable occurrence definitions: end ---\n"
+    )
+    insertion_index = (
+        first_line_output_index
+        if first_line_output_index is not None
+        else len(output)
+    )
+    output.insert(insertion_index, generated_block)
+    return "".join(output), generated_names
+
+
+def add_watch_points(
+    input_file,
+    output_file,
+    results_path,
+    beamline_name="machine",
+    rename_all_repeated=True,
+):
+    """Flatten one beamline and insert occurrence-specific WATCH elements.
+
+    Only repeated *controllable* elements are cloned as ``NAME_1``,
+    ``NAME_2``, ... .  Passive elements, apertures, drifts, monitors, and RF
+    cavities may appear repeatedly without being redefined.  Direct references
+    are counted across uncommented LINE definitions; remaining repetitions
+    introduced by nested/repeated LINE expansion are qualified in the selected
+    beamline.  The legacy ``rename_all_repeated`` argument is retained for
+    caller compatibility; when true it means "rename repeated controllables".
+
+    WATCH elements are generated only for occurrences that already contain at
+    least one of K1, HKICK, VKICK, or FSE.  Missing control parameters are not
+    invented.
+    """
+    content = Path(input_file).read_text()
+    globally_qualified_names: set[str] = set()
+    if rename_all_repeated:
+        content, globally_qualified_names = _qualify_reused_direct_controllables(
+            content
+        )
+    statements, definitions = _definition_table(content)
+    occurrences = [
+        occurrence
+        for occurrence in _expand_from_definitions(definitions, beamline_name)
+        if occurrence.definition.element_type != "WATCH"
+    ]
+    controllable_counts = Counter(
+        occurrence.name.casefold()
+        for occurrence in occurrences
+        if _is_controllable(occurrence.definition)
+    )
+    indices: Counter[str] = Counter()
+    existing_names = set(definitions)
+
+    generated_element_definitions: List[str] = []
+    generated_watch_definitions: List[str] = []
+    flattened_tokens: List[str] = []
+
+    results_prefix = str(results_path)
+    if results_prefix and not results_prefix.endswith(("/", "\\")):
+        results_prefix += "/"
+
+    for occurrence in occurrences:
+        key = occurrence.name.casefold()
+        indices[key] += 1
+        occurrence_number = indices[key]
+        controllable = _is_controllable(occurrence.definition)
+        repeated_controllable = controllable_counts[key] > 1
+
+        active_name = occurrence.name
+        if repeated_controllable and rename_all_repeated:
+            active_name = f"{occurrence.name}_{occurrence_number}"
+            active_key = active_name.casefold()
+            if active_key in existing_names:
+                raise LatticeParseError(
+                    f"Cannot create occurrence name {active_name}: it already exists"
+                )
+            existing_names.add(active_key)
+            generated_element_definitions.append(
+                f"{active_name}: {occurrence.definition.rhs}\n"
+            )
+
+        if controllable:
+            occurrence_is_qualified = (
+                active_name != occurrence.name
+                or key in globally_qualified_names
+            )
+            watch_name = (
+                f"W{active_name}"
+                if occurrence_is_qualified
+                else f"W{occurrence.name}_{occurrence_number}"
+            )
+            watch_key = watch_name.casefold()
+            if watch_key in existing_names:
+                raise LatticeParseError(
+                    f"Cannot create WATCH {watch_name}: it already exists"
+                )
+            existing_names.add(watch_key)
+            generated_watch_definitions.append(
+                f'{watch_name}: WATCH, filename="{results_prefix}{watch_name}.sdds", '
+                "mode=coord\n"
+            )
+            flattened_tokens.append(watch_name)
+
+        token = f"-{active_name}" if occurrence.reverse else active_name
+        flattened_tokens.append(token)
+
+    generated_block_parts: List[str] = [
+        "! --- generated by Utils.add_watch_points: begin ---\n"
+    ]
+    generated_block_parts.extend(generated_element_definitions)
+    generated_block_parts.extend(generated_watch_definitions)
+    generated_block_parts.append(
+        "! --- generated by Utils.add_watch_points: end ---\n"
+    )
+    generated_block = "".join(generated_block_parts)
+
+    target_statement = next(
+        (
+            statement
+            for statement in statements
+            if statement.name and statement.name.casefold() == beamline_name.casefold()
+        ),
+        None,
+    )
+    if target_statement is None:
+        raise LatticeParseError(f"Beamline {beamline_name!r} was not found")
+    new_line = _render_line_statement(
+        target_statement.name, flattened_tokens, target_statement.raw
+    )
+    output_content = _replace_statement(
+        statements, beamline_name, new_line, prefix=generated_block
+    )
+    Path(output_file).write_text(output_content)
+    validate_lattice_structure(output_file, beamline_name)
+
+
+def add_final_watch_point(
+    input_file, output_file, beamline_name, results_path
+):
+    """Append ``final_WP`` to the selected beamline exactly once."""
+    content = Path(input_file).read_text()
+    statements, definitions = _definition_table(content)
+    target = definitions.get(str(beamline_name).casefold())
+    if target is None or target.element_type != "LINE":
+        raise LatticeParseError(f"LINE {beamline_name!r} was not found")
+
+    items = _parse_line_items(target.rhs)
+    tokens = [item.raw.strip() for item in items]
+    if not any(item.name.casefold() == "final_wp" for item in items):
+        tokens.append("final_WP")
+
+    final_definition = definitions.get("final_wp")
+    prefix = ""
+    if final_definition is None:
+        results_prefix = str(results_path)
+        if results_prefix and not results_prefix.endswith(("/", "\\")):
+            results_prefix += "/"
+        prefix = (
+            f'final_WP: WATCH, filename="{results_prefix}final_WP.sdds", '
+            "mode=coord\n"
+        )
+    elif final_definition.element_type != "WATCH":
+        raise LatticeParseError("final_WP exists but is not a WATCH element")
+
+    target_statement = next(
+        statement
+        for statement in statements
+        if statement.name and statement.name.casefold() == str(beamline_name).casefold()
+    )
+    replacement = _render_line_statement(
+        target_statement.name, tokens, target_statement.raw
+    )
+    output_content = _replace_statement(
+        statements, str(beamline_name), replacement, prefix=prefix
+    )
+    Path(output_file).write_text(output_content)
+    validate_lattice_structure(output_file, str(beamline_name))
+
+
+def _rewrite_control_values(
+    raw: str, element_name: str, *, placeholders: bool
+) -> Tuple[str, Tuple[str, ...]]:
+    """Rewrite control values only in code, leaving comments byte-for-byte."""
+    found: List[str] = []
+
+    def replace_assignment(match: re.Match[str]) -> str:
+        key = match.group(1).upper()
+        found.append(key)
+        value = f"{{variables['{element_name}{key}']}}" if placeholders else "0"
+        return f"{match.group(1)}{match.group(2)}{value}"
+
+    rewritten_lines: List[str] = []
+    for line in raw.splitlines(keepends=True):
+        newline = ""
+        body = line
+        if line.endswith("\r\n"):
+            body, newline = line[:-2], "\r\n"
+        elif line.endswith(("\n", "\r")):
+            body, newline = line[:-1], line[-1]
+        code, comment = _split_code_comment(body)
+        rewritten_code = _CONTROL_ASSIGNMENT_RE.sub(replace_assignment, code)
+        rewritten_lines.append(rewritten_code + comment + newline)
+    ordered = tuple(key for key in CONTROL_PARAMETERS if key in found)
+    return "".join(rewritten_lines), ordered
+
+
+def change_initial_content(file_path, output_file, beamline_name="machine"):
+    """Create an agent template and a valid zero-control reset lattice.
+
+    ``output_file`` receives a lattice where only existing active K1, HKICK,
+    VKICK, and FSE values are set to zero.  The returned string has placeholders
+    in those same positions.  Replacing the placeholders with agent actions
+    therefore creates the simulation lattice without reconstructing or dropping
+    any other element parameter.
+    """
+    content = Path(file_path).read_text()
+    statements, definitions = _definition_table(content)
+    active_occurrences = _expand_from_definitions(definitions, beamline_name)
+    active_names: List[str] = []
+    seen = set()
+    for occurrence in active_occurrences:
+        key = occurrence.name.casefold()
+        if occurrence.definition.element_type == "WATCH" or key in seen:
+            continue
+        seen.add(key)
+        if _is_controllable(occurrence.definition):
+            active_names.append(occurrence.name)
+    active_keys = {name.casefold() for name in active_names}
+
+    template_parts: List[str] = []
+    reset_parts: List[str] = []
+    controls_by_name: Dict[str, Tuple[str, ...]] = {}
+    for statement in statements:
+        if (
+            statement.name
+            and statement.rhs is not None
+            and statement.name.casefold() in active_keys
+        ):
+            template_raw, template_keys = _rewrite_control_values(
+                statement.raw, statement.name, placeholders=True
+            )
+            reset_raw, reset_keys = _rewrite_control_values(
+                statement.raw, statement.name, placeholders=False
+            )
+            if template_keys != reset_keys:
+                raise LatticeValidationError(
+                    f"Control rewrite mismatch for {statement.name}"
+                )
+            controls_by_name[statement.name.casefold()] = template_keys
+            template_parts.append(template_raw)
+            reset_parts.append(reset_raw)
+        else:
+            template_parts.append(statement.raw)
+            reset_parts.append(statement.raw)
+
+    variables: List[str] = []
+    for name in active_names:
+        for key in controls_by_name.get(name.casefold(), ()):
+            variables.append(f"{name}{key}")
+
+    formatted_lattice = "".join(template_parts)
+    reset_lattice = "".join(reset_parts)
+    Path(output_file).write_text(reset_lattice)
+    validate_lattice_structure(output_file, beamline_name)
+    return formatted_lattice, variables
+
+
+def parse_lte_file(file_path):
+    """Parse all active one- or multi-line definitions into ``name -> RHS``."""
+    content = Path(file_path).read_text()
+    _, definitions = _definition_table(content)
+    return {definition.name: definition.rhs for definition in definitions.values()}
+
+
+def expand_beamline(element_definitions, beamline_name):
+    """Expand a LINE structurally, including repetition and reversal."""
+    definitions: Dict[str, _Definition] = {}
+    for name, rhs in element_definitions.items():
+        element_type, _ = _definition_type_and_parameters(rhs)
+        definitions[str(name).casefold()] = _Definition(
+            str(name), str(rhs), element_type
+        )
+    occurrences = _expand_from_definitions(definitions, beamline_name)
+    return [
+        (f"-{item.name}" if item.reverse else item.name, item.definition.rhs)
+        for item in occurrences
+    ]
+
+
+def create_graph(expanded_beamline):
+    """Create a lossless occurrence sequence for every Elegant element type."""
+    graph: List[Dict[str, object]] = []
+    for item in expanded_beamline:
+        if not item:
+            continue
+        raw_name = str(item[0])
+        reverse = raw_name.startswith("-")
+        element_name = raw_name[1:] if reverse else raw_name
+        definition = str(item[1]) if len(item) > 1 else ""
+        if definition:
+            element_type, attributes = _definition_type_and_parameters(definition)
+        else:
+            element_type, attributes = "UNKNOWN", {}
+        graph.append(
+            {
+                "name": element_name,
+                "type": element_type,
+                "attributes": attributes,
+                "controllable": any(
+                    key in attributes for key in CONTROL_PARAMETERS
+                ),
+                "controllable_parameters": [
+                    key for key in CONTROL_PARAMETERS if key in attributes
+                ],
+                "reverse": reverse,
+                "raw_definition": definition,
+            }
+        )
+    return graph
+
+
+def process_lte_file_to_graph(file_path, beamline_name):
+    definitions = parse_lte_file(file_path)
+    return create_graph(expand_beamline(definitions, beamline_name))
+
+
+def create_feature_matrix(graph):
+    """Create a safe fixed-width matrix for the normalized graph vocabulary."""
+    element_types = [
+        "CHARGE",
+        "WATCH",
+        "MAXAMP",
+        "RFCA",
+        "QUAD",
+        "SBEND",
+        "DRIFT",
+        "SEXT",
+        "MARK",
+        "MARKER",
+        "MONI",
+        "KICKER",
+        "HKICK",
+        "VKICK",
+        "UNKNOWN",
+        "OTHER",
+    ]
+    attribute_names = [
+        "L",
+        "K1",
+        "K2",
+        "K3",
+        "HKICK",
+        "VKICK",
+        "ANGLE",
+        "FSE",
+        "TILT",
+        "X_MAX",
+        "Y_MAX",
+        "ELLIPTICAL",
+        "VOLT",
+        "FREQ",
+        "PHASE",
+    ]
+    encoder = OneHotEncoder(categories=[element_types], handle_unknown="ignore")
+    encoder.fit(np.asarray(element_types).reshape(-1, 1))
+
+    rows: List[np.ndarray] = []
+    for node in graph:
+        raw_type = _normalize_element_type(str(node.get("type", "UNKNOWN")))
+        encoded_type = raw_type if raw_type in element_types else "OTHER"
+        type_vector = encoder.transform([[encoded_type]]).toarray().ravel()
+        attributes = node.get("attributes") or {}
+        numeric: List[float] = []
+        for name in attribute_names:
+            try:
+                numeric.append(float(attributes.get(name, 0)))
+            except (TypeError, ValueError):
+                numeric.append(0.0)
+        rows.append(np.concatenate((type_vector, np.asarray(numeric))))
+
+    width = len(element_types) + len(attribute_names)
+    if not rows:
+        return np.empty((0, width), dtype=float)
+    matrix = np.asarray(rows, dtype=float)
+    matrix[:, len(element_types) :] = MinMaxScaler().fit_transform(
+        matrix[:, len(element_types) :]
+    )
+    return matrix
+
+
+def validate_lattice_structure(file_path, beamline_name="machine"):
+    """Fail fast on duplicates, undefined items, or misplaced generated WATCHes."""
+    content = Path(file_path).read_text()
+    _, definitions = _definition_table(content, reject_duplicates=True)
+    occurrences = _expand_from_definitions(definitions, beamline_name)
+    graph = create_graph(
+        [
+            (
+                f"-{occurrence.name}" if occurrence.reverse else occurrence.name,
+                occurrence.definition.rhs,
+            )
+            for occurrence in occurrences
+        ]
+    )
+
+    for index, occurrence in enumerate(occurrences):
+        if not _is_controllable(occurrence.definition):
+            continue
+        if index == 0 or occurrences[index - 1].definition.element_type != "WATCH":
+            raise LatticeValidationError(
+                f"Controllable element {occurrence.name} does not have a WATCH immediately before it"
+            )
+
+    return {
+        "beamline": beamline_name,
+        "occurrences": len(occurrences),
+        "watch_points": sum(
+            occurrence.definition.element_type == "WATCH"
+            for occurrence in occurrences
+        ),
+        "types": dict(Counter(str(node["type"]) for node in graph)),
+        "graph": graph,
+    }
+
+
+def validate_with_elegant(
+    lattice_file,
+    beamline_name="machine",
+    elegant_executable="elegant",
+    rpn_defns=None,
+    p_central_mev=10.0,
+    timeout=30,
+):
+    """Ask Elegant itself to parse the generated lattice before training.
+
+    This performs only ``run_setup``.  It validates definitions and beamline
+    expansion without attempting tracking, Twiss matching, or particle I/O.
+    The caller should pass the same Elegant executable/RPN definitions used by
+    the training environment.
+    """
+    lattice_path = Path(lattice_file).resolve()
+    executable = str(elegant_executable)
+    if not (Path(executable).is_file() or shutil.which(executable)):
+        raise FileNotFoundError(f"Elegant executable not found: {executable}")
+
+    with tempfile.TemporaryDirectory(prefix="elegant_lattice_validation_") as temp_dir:
+        command_file = Path(temp_dir) / "validate.ele"
+        command_file.write_text(
+            "&run_setup\n"
+            f'  lattice = "{lattice_path}",\n'
+            f"  use_beamline = {beamline_name},\n"
+            f"  p_central_mev = {float(p_central_mev)}\n"
+            "&end\n"
+        )
+        command = [executable]
+        if rpn_defns:
+            command.append(f"-rpnDefns={Path(rpn_defns).resolve()}")
+        command.append(str(command_file))
+        result = subprocess.run(
+            command,
+            cwd=temp_dir,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        combined = "\n".join(part for part in (result.stdout, result.stderr) if part)
+        if result.returncode != 0 or re.search(r"(?im)^\s*error:", combined):
+            raise LatticeValidationError(
+                f"Elegant rejected {lattice_path}:\n{combined.strip()}"
+            )
+        return {
+            "returncode": result.returncode,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+        }

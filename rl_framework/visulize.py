@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from html import escape
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -88,13 +89,21 @@ class ElegantVisualizer:
     def _read_html(path: Path) -> HTML:
         """Embed a standalone plot document in an isolated notebook iframe."""
         document = path.read_text(encoding="utf-8")
-        return HTML(
-            '<iframe '
-            f'srcdoc="{escape(document, quote=True)}" '
-            'style="width:100%; height:650px; border:0;" '
-            'sandbox="allow-scripts allow-same-origin" '
-            'loading="lazy"></iframe>'
-        )
+        # IPython warns for any inline iframe even though srcdoc is precisely
+        # what keeps this self-contained. Suppress only that known warning.
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="Consider using IPython.display.IFrame instead",
+                category=UserWarning,
+            )
+            return HTML(
+                '<iframe '
+                f'srcdoc="{escape(document, quote=True)}" '
+                'style="width:100%; height:650px; border:0;" '
+                'sandbox="allow-scripts allow-same-origin" '
+                'loading="lazy"></iframe>'
+            )
 
     def plot_magnets(
         self,

@@ -247,9 +247,14 @@ def make_env(cfg: dict, seed: int, algo_tag: str = "sb") -> ACCElegantEnvironmen
         stage=env_cfg.get("stage", None),
         n_bins=env_cfg.get("n_bins", 5),
         init_num_particles=env_cfg.get("init_num_particles", 1000),
+        set_initial_particles=env_cfg.get("set_initial_particles", True),
         logger=env_logger,
         file_handler=file_handler,
         reset_specific_keys_bool=env_cfg.get("reset_specific_keys_bool", False),
+        reset_keys=env_cfg.get("reset_keys", ["HKICK", "VKICK", "FSE"]),
+        validate_generated_lattice=env_cfg.get(
+            "validate_generated_lattice", True
+        ),
         input_beamline_file=sim_cfg.get("input_beamline_file", "machine.lte"),
         beamline_name=sim_cfg.get("beamline_name", "machine"),
         output_beamline_file=sub(

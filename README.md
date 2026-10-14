@@ -48,9 +48,11 @@ with exact `==` versions in `requirements.txt`, including:
 ├── rl_framework/
 │   ├── Environment.py
 │   ├── Elegant.py
+│   ├── Elegant_edited.py
 │   ├── visulize.py
 │   ├── visualization.py
 │   ├── Utils.py
+│   ├── Utils_magnet_actions.py
 │   └── Agents/DDPG.py
 └── classical_optimizers/
     ├── scipy_optimization.py
@@ -234,6 +236,55 @@ these `config.json` values:
 
 `input_beam_file` is the filename stem, so `track` refers to `track.ele`.
 
+## Observation and action contract
+
+With the default `environment.n_bins: 5`, every observation has **59 float32
+values** in this fixed order:
+
+```text
+16 robust x/y/xp/yp statistics
++ 25 normalized x-y histogram bins
++ 1 surviving-particle fraction
++ 1 aperture fraction
++ 10 covariance values
++ 4 previous/next aperture values
++ 1 signed upcoming dipole ANGLE (0 for a quadrupole)
++ 1 upcoming magnet TILT
+= 59
+```
+
+Reversed dipole occurrences negate the angle. Tilt keeps the value written in
+the active lattice. The terminal observation uses `angle=0` and `tilt=0`.
+Changing `n_bins` changes the width according to `34 + n_bins**2`; the runtime,
+fallback state, observation space, checkpoints, and replay-buffer checks all use
+that same function. Old 57- or 58-value checkpoints and buffers are rejected
+with an explicit migration error.
+
+The policy action stays fixed at `[K1, HKICK, VKICK, FSE]`. An
+occurrence-specific registry masks channels that are absent from the active
+magnet definition, including repeated magnets and Elegant quadrupole/bend
+aliases.
+
+## Strengthened Elegant wrapper
+
+The environment uses the enhanced wrapper in `Elegant_edited.py`. It combines
+the general lattice/action fixes with the QDAC wrapper's generated-lattice
+validation and particle-derived optics comparison methods. Validation is on by
+default (`environment.validate_generated_lattice: true`) and can be disabled
+for parser/unit tests that intentionally do not have Elegant installed.
+
+Beam-source handling is explicit:
+
+- `set_initial_particles: true` requires exactly one `&bunched_beam` and writes
+  `init_num_particles` into it.
+- `set_initial_particles: false` requires exactly one `&sdds_beam`; the SDDS
+  file is counted and is the authoritative initial particle count.
+- Mixed or mismatched source modes fail before training.
+
+For the full before/after explanation, source provenance, data flow, migration
+notes, and verification evidence, see
+[`docs/strengthened_base_2026.md`](docs/strengthened_base_2026.md).
+
 ## 4. Check the installation
 
 Before starting a long run:
@@ -303,10 +354,34 @@ For another seed:
 python train.py --training.seed 1
 ```
 
-For K-only training:
+For K1-only training, enable reset behavior and keep the default reset list:
 
 ```bash
 python train.py --environment.reset_specific_keys_bool true
+```
+
+The default is:
+
+```json
+"reset_keys": ["HKICK", "VKICK", "FSE"]
+```
+
+Any subset of `K1`, `HKICK`, `VKICK`, and `FSE` can be disabled. For example,
+to hold only K1 and FSE at zero:
+
+```bash
+python train.py \
+  --environment.reset_specific_keys_bool true \
+  --environment.reset_keys K1 FSE
+```
+
+To disable every policy channel:
+
+```json
+{
+  "reset_specific_keys_bool": true,
+  "reset_keys": ["K1", "HKICK", "VKICK", "FSE"]
+}
 ```
 
 For all 37 control variables, keep

@@ -137,7 +137,14 @@ class RLConfig:
         self.stage = env_cfg.get('stage', None)
         self.n_bins = env_cfg.get('n_bins', 5)
         self.reset_specific_keys_bool = env_cfg.get('reset_specific_keys_bool', False)
+        self.reset_keys = env_cfg.get(
+            'reset_keys', ['HKICK', 'VKICK', 'FSE']
+        )
         self.init_num_particles = env_cfg.get('init_num_particles', 1000)
+        self.set_initial_particles = env_cfg.get('set_initial_particles', True)
+        self.validate_generated_lattice = env_cfg.get(
+            'validate_generated_lattice', True
+        )
 
         # Replay Buffer Configuration
         buffer_cfg = config_dict.get('buffer', {})
@@ -231,9 +238,12 @@ class RLConfig:
             stage=self.stage,
             n_bins=self.n_bins,
             init_num_particles=self.init_num_particles,
+            set_initial_particles=self.set_initial_particles,
             logger=logger_obj,
             file_handler=file_handler,
             reset_specific_keys_bool=self.reset_specific_keys_bool,
+            reset_keys=self.reset_keys,
+            validate_generated_lattice=self.validate_generated_lattice,
             input_beamline_file=self.input_beamline_file,
             beamline_name=self.beamline_name,
             output_beamline_file=self.output_beamline_file,
@@ -283,7 +293,10 @@ class RLConfig:
     def load_buffer(self, agent):
         """Load the requested replay buffer or fail with an actionable error."""
         if os.path.exists(self.load_buffer_filepath):
-            agent.buffer.load(self.load_buffer_filepath)
+            agent.buffer.load(
+                self.load_buffer_filepath,
+                expected_obs_dim=agent.input_dims,
+            )
             logger.info(f"Loaded replay buffer from {self.load_buffer_filepath}")
         else:
             raise FileNotFoundError(
@@ -342,6 +355,9 @@ class RLConfig:
         config_str += f"  Discount Factor (γ): {self.gamma}\n"
         config_str += f"  Soft Update (τ): {self.tau}\n"
         config_str += f"  Initial Particles: {self.init_num_particles}\n"
+        config_str += (
+            f"  Reset Controls: {self.reset_keys if self.reset_specific_keys_bool else 'disabled'}\n"
+        )
         config_str += f"  Results Path: {self.results_path}\n"
         config_str += f"  TensorBoard Log: {self.tb_file_name}\n"
         

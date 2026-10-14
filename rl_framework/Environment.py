@@ -2,9 +2,14 @@ import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
 from sklearn.preprocessing import StandardScaler
-from rl_framework.Utils import compute_covariance_matrix_mean, reset_specific_keys, setLogger, create_feature_matrix, change_num_initial_particles, create_seeded_tracking_file
-import random
-from rl_framework.Elegant import ElegantWrapper
+from rl_framework.Utils import compute_covariance_matrix_mean, reset_specific_keys, setLogger, create_feature_matrix, configure_initial_particles, create_seeded_tracking_file, nn_observation_size
+from rl_framework.Utils_magnet_actions import (
+    ACTION_CHANNEL_INDEX,
+    normalize_reset_keys,
+    reset_policy_mask,
+    split_control_variable,
+)
+from rl_framework.Elegant_edited import ElegantWrapper
 import math
 import os
 import logging
@@ -15,7 +20,16 @@ MAX_RESET_RETRIES = 3
 
 
 class ACCElegantEnvironment(gym.Env):
-    def __init__(self,stage = None,n_bins= 5, init_num_particles= None, results_path= ' ', input_beamline_file= "machine.lte", input_beam_file= "track", beamline_name= 'machine', output_beamline_file='updated_machine.lte', elegant_input_filename='elegant_input.lte', reset_specific_keys_bool= True, logger=None, file_handler=None, elegant_path= "", sddsPath= "", override_dynamic_command= False, overridden_command= " ", seed=0):
+    """Gymnasium environment with a fixed 59-value observation for ``n_bins=5``.
+
+    The final two values are the signed bend angle and tilt of the upcoming
+    controllable magnet.  Both are zero for an end-of-line observation, and
+    angle is zero for quadrupoles.
+    """
+
+    metadata = {"render_modes": []}
+
+    def __init__(self,stage = None,n_bins= 5, init_num_particles= None, set_initial_particles=True, results_path= ' ', input_beamline_file= "machine.lte", input_beam_file= "track", beamline_name= 'machine', output_beamline_file='updated_machine.lte', elegant_input_filename='elegant_input.lte', reset_specific_keys_bool= True, reset_keys=None, validate_generated_lattice=True, logger=None, file_handler=None, elegant_path= "", sddsPath= "", override_dynamic_command= False, overridden_command= " ", seed=0):
         self.override_dynamic_command= override_dynamic_command
         self.overridden_command= overridden_command
         self.seed = int(seed)
@@ -30,14 +44,20 @@ class ACCElegantEnvironment(gym.Env):
         self.inputs_dir = f"inputs_{self.seed}"
         self.n_bins= n_bins
         self.initial_reward= 1
-        self.init_num_particles= init_num_particles #we are solving for one number of particles.
+        self.init_num_particles = init_num_particles
+        self.configured_init_num_particles = init_num_particles
+        self.set_initial_particles = set_initial_particles
+        self.validate_generated_lattice = bool(validate_generated_lattice)
+        self.reset_specific_keys_bool = bool(reset_specific_keys_bool)
+        self.reset_keys = normalize_reset_keys(reset_keys)
+        self._initial_particle_count_reported = False
         self.input_beam_file = create_seeded_tracking_file(
             self.base_input_beam_file,
             self.elegant_input_filename,
             self.results_path,
             self.seed
         )
-        self.wrapper = ElegantWrapper(self.input_file_path, self.input_beam_file, self.beamline_name, self.output_file, elegant_path= self.elegantPath, sddsPath= self.sddsPath, results_path= self.results_path, elegant_input_filename= self.elegant_input_filename, overrid_dynmaic_commnad=self.override_dynamic_command, overrideen_command= self.overridden_command, seed=self.seed)
+        self.wrapper = self._make_wrapper()
 
         '''
         print("#############$$$$$$$$$$$$$$$$$$$$$ Env DEBUG $$$$$$$$$$$$$$##############")
@@ -53,8 +73,6 @@ class ACCElegantEnvironment(gym.Env):
         print("#############$$$$$$$$$$$$$$$$$$$$$ Env DEBUG $$$$$$$$$$$$$$##############")
         '''
 
-        self.reset_specific_keys_bool = reset_specific_keys_bool
-        self.wrapper.reset_specific_keys_bool = self.reset_specific_keys_bool
         self.max_num_of_vars=  len(self.wrapper.chroneological_order_controllable_vars)
         self.max_num_of_states = self.wrapper.max_itteration
         if stage != None and stage < self.max_num_of_vars:
@@ -64,6 +82,7 @@ class ACCElegantEnvironment(gym.Env):
         self.stage_mask = None  # Mask for controlling variables based on the stage
         self.observation = None
         self.variables = self.wrapper.chroneological_variables
+        self._sync_action_registry()
         self._set_action_space(self.variables)
         self.reset()
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(self.observation_shape,), dtype=np.float32)
@@ -103,23 +122,29 @@ class ACCElegantEnvironment(gym.Env):
         action_low = np.array(action_low, dtype=np.float32)
         action_high = np.array(action_high, dtype=np.float32)
 
-        self.action_space_fake = spaces.Box(
-            low=action_low,
-            high=action_high,
-            dtype=np.float32,
-        )
+        self.action_space_fake = spaces.Box(low=action_low, high=action_high)
         self.action_space_fake.n = self.action_space_fake.low.size
 
         #Real action space, this one to be used for the actual environment and it will also be used to define the shape of the output of the policy network.
-        action_low = np.array([-20, -0.005, -0.005, -0.005], dtype=np.float32)
-        action_high = np.array([20, 0.005, 0.005, 0.005], dtype=np.float32)
+        action_low=   np.array([-20, -0.005, -0.005, -0.005], dtype=np.float32)
+        action_high= np.array([20, 0.005, 0.005, 0.005], dtype=np.float32)
 
-        self.action_space = spaces.Box(
-            low=action_low,
-            high=action_high,
-            dtype=np.float32,
-        )
+        self.action_space = spaces.Box(low=action_low, high=action_high)
         self.action_space.n = self.action_space.low.size
+
+    def _sync_action_registry(self):
+        """Attach and validate the occurrence-specific registry built by the wrapper."""
+        registry = self.wrapper.magnet_action_registry
+        if tuple(self.variables) != registry.variable_names:
+            raise RuntimeError(
+                "Wrapper control variables changed while rebuilding the environment"
+            )
+        self.magnet_action_registry = registry
+        self.controllable_parameters_by_element = registry.parameters_by_element()
+        self.magnet_action_inventory = registry.inventory(
+            self.reset_specific_keys_bool,
+            reset_keys=self.reset_keys,
+        )
 
     def _convert_variables(self, values):
         """Convert values from the range [-1, 1] to the correct range based on the variable names."""
@@ -140,6 +165,13 @@ class ACCElegantEnvironment(gym.Env):
         Returns:
         np.array: A binary mask indicating the variables to control.
         """
+        if hasattr(self, "magnet_action_registry"):
+            return self.magnet_action_registry.cumulative_environment_mask(
+                self.stage - 1,
+                reset_specific_keys_bool=self.reset_specific_keys_bool,
+                dtype=np.float64,
+                reset_keys=self.reset_keys,
+            )
         stage_mask = np.zeros(len(self.variables))
         count = 0
 
@@ -153,7 +185,7 @@ class ACCElegantEnvironment(gym.Env):
         return stage_mask
 
     def _observation_dim(self):
-        return 16 + self.n_bins ** 2 + 1 + 1 + 10 + 4
+        return nn_observation_size(self.n_bins)
 
     def _fallback_observation(self):
         dim = getattr(self, "observation_shape", self._observation_dim())
@@ -178,6 +210,10 @@ class ACCElegantEnvironment(gym.Env):
             overrid_dynmaic_commnad=self.override_dynamic_command,
             overrideen_command=self.overridden_command,
             seed=self.seed,
+            n_bins=self.n_bins,
+            reset_specific_keys_bool=self.reset_specific_keys_bool,
+            reset_keys=self.reset_keys,
+            validate_generated_lattice=self.validate_generated_lattice,
         )
 
     def _run_reset_simulation(self):
@@ -185,7 +221,7 @@ class ACCElegantEnvironment(gym.Env):
         for attempt in range(1, MAX_RESET_RETRIES + 1):
             try:
                 self.wrapper = self._make_wrapper()
-                self.wrapper.reset_specific_keys_bool = self.reset_specific_keys_bool
+                self._sync_action_registry()
                 if self.wrapper.max_itteration == 0:
                     raise RuntimeError("Lattice preprocessing produced no watch points")
 
@@ -213,7 +249,10 @@ class ACCElegantEnvironment(gym.Env):
                 )
 
         self._log_simulation_error("reset", last_error)
-        return self._fallback_observation(), 0
+        raise RuntimeError(
+            f"Environment reset failed after {MAX_RESET_RETRIES} attempts: "
+            f"{last_error}"
+        )
 
     def reset(self, seed=None, options=None):
         """Reset the environment to the initial state."""
@@ -239,11 +278,29 @@ class ACCElegantEnvironment(gym.Env):
                 self.results_path,
                 self.seed
             )
-        if self.init_num_particles ==None:
-            self.init_num_particles= random.randint(500, 50000)
-            old, self.initial_number_of_particles = change_num_initial_particles(self.input_beam_file+".ele", self.init_num_particles)
-        else:
-            old, self.initial_number_of_particles = change_num_initial_particles(self.input_beam_file+".ele", self.init_num_particles)
+        sdds2stream_path = os.path.join(self.elegantPath, "sdds2stream")
+        self.initial_number_of_particles, beam_mode, beam_path = configure_initial_particles(
+            self.input_beam_file + ".ele",
+            self.set_initial_particles,
+            self.configured_init_num_particles,
+            sdds2stream_path=sdds2stream_path,
+        )
+        # In external-beam mode the SDDS file, never the YAML value, is the
+        # source of truth. Keep the public attribute synchronized for logging.
+        self.init_num_particles = self.initial_number_of_particles
+        source_detail = f" from {beam_path}" if beam_path else ""
+        if not self._initial_particle_count_reported:
+            logger.info(
+                "Training initial particles: %s (%s%s)",
+                self.initial_number_of_particles,
+                beam_mode,
+                source_detail,
+            )
+            print(
+                f"Training initial particles: "
+                f"{self.initial_number_of_particles} ({beam_mode}{source_detail})"
+            )
+            self._initial_particle_count_reported = True
         # initial number of partciles is actually new and it should be equal to self.initial_reward
         self._set_initial_number_of_particles(self.initial_number_of_particles)
         self.done = False
@@ -251,7 +308,7 @@ class ACCElegantEnvironment(gym.Env):
         self.iteration = 0
         self.previous_mask_len = 0
         self.mask_len = 0
-        self.actions_ = np.ones((len(self.variables),))
+        self.actions_ = np.zeros((len(self.variables),))
         observations, reward = self._run_reset_simulation()
 
         if reward != 0:
@@ -259,8 +316,21 @@ class ACCElegantEnvironment(gym.Env):
             self.number_of_particle_prev = self.initial_reward
 
         self.observation_shape = self._observation_dim()
-        self.observation = np.asarray(observations, dtype=np.float32)
+        self.observation = self._validated_observation(observations, "reset")
         return self.observation, {}
+
+    def _validated_observation(self, observation, context):
+        """Return a finite float32 vector and fail on accidental schema drift."""
+        result = np.asarray(observation, dtype=np.float32).reshape(-1)
+        expected = self._observation_dim()
+        if result.size != expected:
+            raise RuntimeError(
+                f"{context} produced {result.size} observation values; expected "
+                f"{expected} (57 beam/aperture + angle + tilt for n_bins=5)."
+            )
+        if not np.all(np.isfinite(result)):
+            raise RuntimeError(f"{context} produced a non-finite observation")
+        return result
 
     def _set_initial_number_of_particles(self,new):
         self.initial_number_of_particles = new
@@ -268,30 +338,56 @@ class ACCElegantEnvironment(gym.Env):
 
     def _check_number_of_variables_to_be_set_at_this_iteration(self):
         """Return the action-variable counts for the current and next elements."""
-        element_order = self.wrapper.chroneological_order_controllable_vars
-        current_var = None
-        next_var = None
-
-        if 0 <= self.iteration < len(element_order):
-            current_var = element_order[self.iteration]
-        if 0 <= self.iteration + 1 < len(element_order):
-            next_var = element_order[self.iteration + 1]
-
-        count_current = 0
-        count_next = 0
-        for var in self.variables:
-            base_name = (
-                var.replace("K1", "")
-                .replace("HKICK", "")
-                .replace("VKICK", "")
-                .replace("FSE", "")
+        if hasattr(self, "magnet_action_registry"):
+            current = self.magnet_action_registry.spec_for_iteration(self.iteration)
+            next_spec = self.magnet_action_registry.spec_for_iteration(
+                self.iteration, offset=1
             )
-            if current_var is not None and current_var == base_name:
-                count_current += 1
-            if next_var is not None and next_var == base_name:
-                count_next += 1
+            return (
+                0 if current is None else len(current.parameters),
+                0 if next_spec is None else len(next_spec.parameters),
+            )
+        return (
+            len(self._variables_for_iteration(0)),
+            len(self._variables_for_iteration(1)),
+        )
 
-        return count_current, count_next
+    @staticmethod
+    def _split_variable_name(variable):
+        """Return ``(element_name, action_channel)`` for an agent variable."""
+        return split_control_variable(variable)
+
+    def _variables_for_iteration(self, offset=0):
+        if hasattr(self, "magnet_action_registry"):
+            spec = self.magnet_action_registry.spec_for_iteration(
+                self.iteration, offset=offset
+            )
+            return [] if spec is None else list(spec.variable_names)
+        element_order = self.wrapper.chroneological_order_controllable_vars
+        element_index = self.iteration + offset
+        if not 0 <= element_index < len(element_order):
+            return []
+        element_name = element_order[element_index]
+        return [
+            variable
+            for variable in self.variables
+            if self._split_variable_name(variable)[0] == element_name
+        ]
+
+    def _action_indices_for_iteration(self, offset=0):
+        if hasattr(self, "magnet_action_registry"):
+            mask = self.magnet_action_registry.availability_policy_mask(
+                self.iteration, offset=offset, dtype=np.float64
+            )
+            return list(np.flatnonzero(mask))
+        channel_index = ACTION_CHANNEL_INDEX
+        indices = []
+        for variable in self._variables_for_iteration(offset):
+            _, parameter = self._split_variable_name(variable)
+            if parameter is None:
+                raise RuntimeError(f"Unknown controllable variable: {variable}")
+            indices.append(channel_index[parameter])
+        return indices
 
     def _get_mask(self, mask_len):
         """Generate a mask for the current iteration.
@@ -299,30 +395,55 @@ class ACCElegantEnvironment(gym.Env):
         mask_len=3
         output= [1, 1, 1, 0, 0, 0, 0, 0, 0, 0]
         """
+        if hasattr(self, "magnet_action_registry"):
+            return self.magnet_action_registry.cumulative_environment_mask(
+                self.iteration,
+                reset_specific_keys_bool=self.reset_specific_keys_bool,
+                dtype=np.float64,
+                reset_keys=self.reset_keys,
+            )
         mask = np.zeros(len(self.variables))
         mask[:mask_len] = 1
         return mask
 
-    def _get_action_mask(self, count):
-        mask= np.zeros(self.action_space.n)
-        if count == 3:
-            mask[:count] = 1
-        elif count==1:
-            mask[-count] = 1
-
-
+    def _get_action_mask(self, count, offset=0):
+        if hasattr(self, "magnet_action_registry"):
+            mask = self.magnet_action_registry.availability_policy_mask(
+                self.iteration, offset=offset, dtype=np.float64
+            )
+            if int(mask.sum()) != count:
+                raise RuntimeError(
+                    f"Expected {count} action channels, found {int(mask.sum())}"
+                )
+            return mask
+        mask = np.zeros(self.action_space.n)
+        indices = self._action_indices_for_iteration(offset)
+        if len(indices) != count:
+            raise RuntimeError(
+                f"Expected {count} action channels, found {len(indices)}"
+            )
+        mask[indices] = 1
         return mask
 
-    def _get_new_action(self, count, action):
-        new_action = None
-        if count == 3:
-            new_action= np.zeros(3)
-            new_action= action[:count]
-        elif count==1:
-            new_action= np.zeros(1)
-            new_action= action[-count:]
-
-        return new_action
+    def _get_new_action(self, count, action, offset=0):
+        if hasattr(self, "magnet_action_registry"):
+            values = self.magnet_action_registry.policy_values(
+                self.iteration,
+                action,
+                reset_specific_keys_bool=False,
+                offset=offset,
+            )
+            if len(values) != count:
+                raise RuntimeError(
+                    f"Expected {count} action channels, found {len(values)}"
+                )
+            return values
+        indices = self._action_indices_for_iteration(offset)
+        if len(indices) != count:
+            raise RuntimeError(
+                f"Expected {count} action channels, found {len(indices)}"
+            )
+        return np.asarray(action)[indices]
 
     def _correct_action(self, action):
         """
@@ -345,6 +466,25 @@ class ACCElegantEnvironment(gym.Env):
         action_mask= [0., 0., 0., 1., 1., 0., 0., 0., 0., 0.]
         previous_actions_mask= [1., 1., 1., 0., 0., 0., 0., 0., 0., 0.]
         """
+        if hasattr(self, "magnet_action_registry"):
+            spec = self.magnet_action_registry.spec_for_iteration(self.iteration)
+            if spec is None or len(action) != len(spec.parameters):
+                raise RuntimeError(
+                    f"Invalid environment action at iteration {self.iteration}"
+                )
+            result = np.zeros(len(self.variables), dtype=np.float64)
+            if self.iteration > 0:
+                prior_mask = self.magnet_action_registry.cumulative_environment_mask(
+                    self.iteration - 1,
+                    reset_specific_keys_bool=self.reset_specific_keys_bool,
+                    dtype=np.float64,
+                    reset_keys=self.reset_keys,
+                ).astype(bool)
+                result[prior_mask] = self.actions_[prior_mask]
+            for variable_index, value in zip(spec.variable_indices, action):
+                result[variable_index] = value
+            return result
+
         # Create a mask for the current iteration's variables
         action_mask = np.zeros(len(self.variables))
         #action_mask[self.previous_mask_len:self.mask_len] = 1
@@ -378,24 +518,45 @@ class ACCElegantEnvironment(gym.Env):
         self.file_handler.flush()
 
 
-    def _get_returned_action_mask(self, count):
+    def _get_returned_action_mask(self, count, offset=0):
         """
-        4-dim mask for actor/critic (Scenario 1), independent of self.action_mask / self.mask.
+        4-D mask for actor/critic, independent of self.action_mask/self.mask.
         Action layout: [K1, HKICK, VKICK, FSE]
 
-        count==3 (quad):  [1,1,1,0]  or  [1,0,0,0] if reset_specific_keys_bool
-        count==1 (bend):  [0,0,0,1]  or  [0,0,0,0] if reset_specific_keys_bool
+        Channels are selected from the actual parameters present on the current
+        occurrence. When reset_specific_keys_bool is true, channels listed in
+        reset_keys stay reset to zero.
         """
-        mask = np.zeros(self.action_space.n, dtype=np.float64)  # 4,
-        if count == 3:
-            if self.reset_specific_keys_bool:
-                mask[0] = 1.0          # [1,0,0,0]
-            else:
-                mask[:3] = 1.0         # [1,1,1,0]
-        elif count == 1:
-            if not self.reset_specific_keys_bool:
-                mask[-1] = 1.0         # [0,0,0,1]
-            # else: stay [0,0,0,0]
+        if hasattr(self, "magnet_action_registry"):
+            mask = self.magnet_action_registry.policy_mask(
+                self.iteration,
+                reset_specific_keys_bool=self.reset_specific_keys_bool,
+                offset=offset,
+                dtype=np.float64,
+                reset_keys=self.reset_keys,
+            )
+            available = self.magnet_action_registry.availability_policy_mask(
+                self.iteration, offset=offset, dtype=np.float64
+            )
+            if int(available.sum()) != count:
+                raise RuntimeError(
+                    f"Expected {count} action channels, found {int(available.sum())}"
+                )
+            return mask
+        mask = np.zeros(self.action_space.n, dtype=np.float64)
+        indices = self._action_indices_for_iteration(offset)
+        if len(indices) != count:
+            raise RuntimeError(
+                f"Expected {count} action channels, found {len(indices)}"
+            )
+        enabled = reset_policy_mask(
+            self.reset_specific_keys_bool,
+            dtype=np.float64,
+            reset_keys=self.reset_keys,
+        )
+        for index in indices:
+            if enabled[index]:
+                mask[index] = 1.0
         return mask
 
     def step(self, action, convert=False):
@@ -411,21 +572,25 @@ class ACCElegantEnvironment(gym.Env):
         # Determine the number of variables to set in this iteration
         num_of_vars_iteration_current, num_of_vars_iteration_next = self._check_number_of_variables_to_be_set_at_this_iteration()
 
-        if num_of_vars_iteration_current not in (1, 3):
+        if num_of_vars_iteration_current not in (1, 2, 3, 4):
             raise RuntimeError(
-                "The current controllable element must expose either one or three "
+                "The current controllable element must expose one to four "
                 f"variables; got {num_of_vars_iteration_current} at iteration {self.iteration}"
             )
-        if num_of_vars_iteration_next not in (0, 1, 3):
+        if num_of_vars_iteration_next not in (0, 1, 2, 3, 4):
             raise RuntimeError(
-                "The next controllable element must expose zero, one, or three "
+                "The next controllable element must expose zero to four "
                 f"variables; got {num_of_vars_iteration_next} at iteration {self.iteration}"
             )
 
         # These actor/critic masks are deliberately independent of
         # self.action_mask and self.mask, which are used by the environment.
-        returned_mask = self._get_returned_action_mask(num_of_vars_iteration_current)
-        returned_mask_next = self._get_returned_action_mask(num_of_vars_iteration_next)
+        returned_mask = self._get_returned_action_mask(
+            num_of_vars_iteration_current, offset=0
+        )
+        returned_mask_next = self._get_returned_action_mask(
+            num_of_vars_iteration_next, offset=1
+        )
 
         if returned_action.size != self.action_space.n:
             raise ValueError(
@@ -435,9 +600,14 @@ class ACCElegantEnvironment(gym.Env):
         # Preserve the fixed 4-D shape and zero only the policy components that
         # do not apply to the current element.
         returned_action *= returned_mask
+        effective_action = np.asarray(action, dtype=np.float64).reshape(-1) * returned_mask
         self.mask_len = self.previous_mask_len + num_of_vars_iteration_current
-        self.action_mask = self._get_action_mask(num_of_vars_iteration_current)
-        new_actions= self._get_new_action(num_of_vars_iteration_current, action)
+        self.action_mask = self._get_action_mask(
+            num_of_vars_iteration_current, offset=0
+        )
+        new_actions = self._get_new_action(
+            num_of_vars_iteration_current, effective_action, offset=0
+        )
 
         self.mask = self._get_mask(self.mask_len)
 
@@ -461,9 +631,12 @@ class ACCElegantEnvironment(gym.Env):
             except (TypeError, OSError) as e:
                 logger.warning("Could not save elegant input debug file: %s", e)
 
-        observations_dataframe, reward, output_file, done = self.wrapper.get_results(
-            self.initial_number_of_particles
-        )
+        if success:
+            observations_dataframe, reward, output_file, done = self.wrapper.get_results(
+                self.initial_number_of_particles
+            )
+        else:
+            observations_dataframe, reward, output_file, done = None, 0, None, True
 
         if not success or observations_dataframe is None:
             self._log_simulation_error(
@@ -487,6 +660,17 @@ class ACCElegantEnvironment(gym.Env):
                 "returned_action": returned_action,
                 "returned_mask": returned_mask,
                 "returned_mask_next": returned_mask_next,
+                "available_action_mask": self.action_mask,
+                "reset_action_mask": reset_policy_mask(
+                    self.reset_specific_keys_bool,
+                    reset_keys=self.reset_keys,
+                ),
+                "environment_action_mask": self.magnet_action_registry.environment_mask(
+                    self.iteration,
+                    reset_specific_keys_bool=self.reset_specific_keys_bool,
+                    dtype=np.float64,
+                    reset_keys=self.reset_keys,
+                ),
             }
             self._log_episode(info)
             return self.observation, float(self.reward), True, False, info
@@ -528,9 +712,8 @@ class ACCElegantEnvironment(gym.Env):
 
             # Preprocess the observation data
 
-            self.observation = np.asarray(
-                observations_dataframe,
-                dtype=np.float32,
+            self.observation = self._validated_observation(
+                observations_dataframe, f"step {self.iteration}"
             )
 
             #self.reward is actual reward "independant of the number of initial particles"
@@ -571,10 +754,22 @@ class ACCElegantEnvironment(gym.Env):
             "returned_action": returned_action,
             "returned_mask": returned_mask,
             "returned_mask_next": returned_mask_next,
+            "available_action_mask": self.action_mask,
+            "reset_action_mask": reset_policy_mask(
+                self.reset_specific_keys_bool,
+                reset_keys=self.reset_keys,
+            ),
+            "environment_action_mask": self.magnet_action_registry.environment_mask(
+                max(self.iteration - 1, 0),
+                reset_specific_keys_bool=self.reset_specific_keys_bool,
+                dtype=np.float64,
+                reset_keys=self.reset_keys,
+            ),
         }
 
-        # Log the episode information
-        if self.done:
+        # Evaluations have their own CSV files. Keep the main environment CSV
+        # limited to noisy training episodes.
+        if self.done and not self.eval_mode:
             self._log_episode(info)
 
 
