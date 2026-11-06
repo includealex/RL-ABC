@@ -42,7 +42,8 @@ hv.extension("bokeh")
 
 
 class ElegantWrapper:
-    def __init__(self, input_beamline_file, input_beam_file, beamline_name, output_beamline_file='updated_machine.lte', elegant_path= "", sddsPath= "", results_path= "results/", elegant_input_filename='elegant_input.lte', overrid_dynmaic_commnad= False, overrideen_command= " ", seed=0, n_bins=5, reset_specific_keys_bool=False, reset_keys=None):
+    def __init__(self, input_beamline_file, input_beam_file, beamline_name, output_beamline_file='updated_machine.lte', elegant_path= "", sddsPath= "", results_path= "results/", elegant_input_filename='elegant_input.lte', overrid_dynmaic_commnad= False, overrideen_command= " ", seed=0, n_bins=5, reset_specific_keys_bool=False, reset_keys=None,
+                 noise_mean=0.0, noise_std=0.0, noise_keys=None, noise_seed=None):
         self.overrid_dynmaic_commnad= overrid_dynmaic_commnad #set to true only when you want to override the dynamic command
         self.seed = int(seed)
         self.n_bins = int(n_bins)
@@ -95,6 +96,31 @@ class ElegantWrapper:
         self.Ax_pos = None
         self.last_elegant_error = None
 
+        # Gaussian noise configuration
+        if np.any(np.asarray(noise_std if not isinstance(noise_std, dict)
+                            else list(noise_std.values())) < 0):
+            raise ValueError("noise_std must be non-negative")
+
+        self.noise_mean = float(noise_mean)
+        # float -> same sigma for all variables; dict -> per-variable sigma
+        self.noise_std = noise_std
+        self.noise_keys = set(noise_keys) if noise_keys is not None else None  # None = all variables
+        self.noise_rng = np.random.default_rng(self.seed if noise_seed is None else noise_seed)
+
+
+    def _add_gaussian_noise(self, variables):
+        """Return a copy of `variables` with additive Gaussian noise N(mean, std^2)."""
+        noisy = dict(variables)
+        for key, value in variables.items():
+            if self.noise_keys is not None and key not in self.noise_keys:
+                continue
+
+            sigma = self.noise_std.get(key, 0.0) if isinstance(self.noise_std, dict) else self.noise_std
+            if sigma == 0.0 and self.noise_mean == 0.0:
+                continue
+
+            noisy[key] = float(value) + self.noise_rng.normal(self.noise_mean, sigma)
+        return noisy
 
     def _order_vars(self):
         """
@@ -215,6 +241,9 @@ class ElegantWrapper:
         print("values: ", values, "len", len(values))
         print("+++++ End Debugging in Elegant.py +++++")'''
         self.dict_variables = create_dict_from_lists(self.chroneological_variables, values)
+
+        self.dict_variables = self._add_gaussian_noise(self.dict_variables)
+
         # Check if the self.formatted_lattice is not empty
         if self.reset_specific_keys_bool:
             # If the self.reset_specific_keys is True, reset the specific keys in the dictionary

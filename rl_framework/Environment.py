@@ -29,7 +29,8 @@ class ACCElegantEnvironment(gym.Env):
 
     metadata = {"render_modes": []}
 
-    def __init__(self,stage = None,n_bins= 5, init_num_particles= None, set_initial_particles=True, results_path= ' ', input_beamline_file= "machine.lte", input_beam_file= "track", beamline_name= 'machine', output_beamline_file='updated_machine.lte', elegant_input_filename='elegant_input.lte', reset_specific_keys_bool= True, reset_keys=None, validate_generated_lattice=True, logger=None, file_handler=None, elegant_path= "", sddsPath= "", override_dynamic_command= False, overridden_command= " ", seed=0):
+    def __init__(self,stage = None,n_bins= 5, init_num_particles= None, set_initial_particles=True, results_path= ' ', input_beamline_file= "machine.lte", input_beam_file= "track", beamline_name= 'machine', output_beamline_file='updated_machine.lte', elegant_input_filename='elegant_input.lte', reset_specific_keys_bool= True, reset_keys=None, validate_generated_lattice=True, logger=None, file_handler=None, elegant_path= "", sddsPath= "", override_dynamic_command= False, overridden_command= " ", seed=0,
+                 noise_mean=0.0, noise_std=0.0, noise_keys=None, noise_seed=None):
         self.override_dynamic_command= override_dynamic_command
         self.overridden_command= overridden_command
         self.seed = int(seed)
@@ -57,6 +58,11 @@ class ACCElegantEnvironment(gym.Env):
             self.results_path,
             self.seed
         )
+        self.noise_mean = float(noise_mean)
+        # float -> same sigma for all variables; dict -> per-variable sigma
+        self.noise_std = noise_std
+        self.noise_keys = set(noise_keys) if noise_keys is not None else None  # None = all variables
+        self.noise_seed = np.random.default_rng(self.seed if noise_seed is None else noise_seed)
         self.wrapper = self._make_wrapper()
 
         '''
@@ -214,6 +220,10 @@ class ACCElegantEnvironment(gym.Env):
             reset_specific_keys_bool=self.reset_specific_keys_bool,
             reset_keys=self.reset_keys,
             validate_generated_lattice=self.validate_generated_lattice,
+            noise_mean=self.noise_mean,
+            noise_std=self.noise_std,
+            noise_keys=self.noise_keys, 
+            noise_seed=self.noise_seed,
         )
 
     def _run_reset_simulation(self):

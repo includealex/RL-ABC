@@ -178,6 +178,11 @@ class RLConfig:
             'done', 'itteration', 'current_element', 'dict_vars'
         ]))
 
+        self.noise_mean = train_cfg.get('noise_mean', 0.0)
+        self.noise_std = train_cfg.get('noise_std', 0.0)
+        self.noise_keys = train_cfg.get('noise_keys', None)
+        self.noise_seed = train_cfg.get('noise_seed', None)
+
         # Device configuration
         self.device = self._setup_device()
 
@@ -254,7 +259,11 @@ class RLConfig:
             override_dynamic_command=self.override_dynamic_command,
             overridden_command=self.overridden_command,
             results_path=self.results_path,
-            seed=self.seed
+            seed=self.seed,
+            noise_mean=self.noise_mean,
+            noise_std=self.noise_std,
+            noise_keys=self.noise_keys, 
+            noise_seed=self.noise_seed,
         )
 
         # Set max_steps dynamically from environment if not specified

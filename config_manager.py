@@ -141,6 +141,11 @@ Examples:
         help="Path to configuration file (YAML or JSON). Default: config.json",
     )
 
+    parser.add_argument("--noise_mean", type=float) 
+    parser.add_argument("--noise_std", type=float) 
+    parser.add_argument("--noise_keys", type=set) 
+    parser.add_argument("--noise_seed", type=float) 
+
     # Platform/Simulation Arguments
     parser.add_argument(
         "--platform.elegant_path",
